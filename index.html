@@ -6,17 +6,26 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Lumina Gallery</title>
     <script src="https://cdn.tailwindcss.com"></script>
-<script type="importmap">
+    <script type="importmap">
 {
   "imports": {
-    "react/": "https://esm.sh/react@^19.2.4/",
-    "react": "https://esm.sh/react@^19.2.4",
-    "react-dom/": "https://esm.sh/react-dom@^19.2.4/"
+    "react": "https://esm.sh/react@19.0.0",
+    "react-dom": "https://esm.sh/react-dom@19.0.0",
+    "react-dom/client": "https://esm.sh/react-dom@19.0.0/client",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "react/": "https://esm.sh/react@^19.2.4/"
   }
 }
 </script>
+    <style>
+        /* Prevents layout shift during theme load */
+        html.dark { background-color: #09090b; color: #f4f4f5; }
+        html { background-color: #fafafa; color: #18181b; }
+    </style>
 </head>
-<body class="bg-zinc-50 text-zinc-900 transition-colors duration-300">
+<body>
     <div id="root"></div>
+    <!-- Explicitly load the entry point -->
+    <script type="module" src="index.tsx"></script>
 </body>
 </html>

@@ -16,27 +16,38 @@ const DB_VERSION = 1;
 
 const openDB = (): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME, { keyPath: 'id' });
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    try {
+      const request = indexedDB.open(DB_NAME, DB_VERSION);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    } catch (e: any) {
+      // Fix: Handle unknown error in catch block
+      reject(e);
+    }
   });
 };
 
 const getAllMedia = async (): Promise<MediaItem[]> => {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, 'readonly');
-    const store = transaction.objectStore(STORE_NAME);
-    const request = store.getAll();
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+  try {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, 'readonly');
+      const store = transaction.objectStore(STORE_NAME);
+      const request = store.getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+  } catch (e: any) {
+    // Fix: Handle unknown error in catch block
+    console.error("DB failed", e);
+    return [];
+  }
 };
 
 const saveMediaItem = async (item: MediaItem): Promise<void> => {
@@ -61,7 +72,6 @@ const deleteMediaItem = async (id: string): Promise<void> => {
   });
 };
 
-// Helper function to format seconds into M:SS string
 const formatTime = (time: number) => {
   const mins = Math.floor(time / 60);
   const secs = Math.floor(time % 60);
@@ -81,31 +91,36 @@ const AuthScreen = ({ onLogin, isDark }: { onLogin: (user: User) => void, isDark
     e.preventDefault();
     setError('');
 
-    const users: User[] = JSON.parse(localStorage.getItem('lumina_users') || '[]');
+    try {
+      const users: User[] = JSON.parse(localStorage.getItem('lumina_users') || '[]');
 
-    if (view === 'signin') {
-      const user = users.find(u => u.email === email && u.password === password);
-      if (user) {
-        onLogin(user);
+      if (view === 'signin') {
+        const user = users.find(u => u.email === email && u.password === password);
+        if (user) {
+          onLogin(user);
+        } else {
+          setError('Invalid email or password');
+        }
+      } else if (view === 'signup') {
+        if (users.some(u => u.email === email)) {
+          setError('Email already exists');
+          return;
+        }
+        const newUser: User = { id: Math.random().toString(36).substr(2, 9), email, password, name };
+        localStorage.setItem('lumina_users', JSON.stringify([...users, newUser]));
+        onLogin(newUser);
       } else {
-        setError('Invalid email or password');
+        setError('Password reset link sent to ' + email);
+        setTimeout(() => setView('signin'), 2000);
       }
-    } else if (view === 'signup') {
-      if (users.some(u => u.email === email)) {
-        setError('Email already exists');
-        return;
-      }
-      const newUser: User = { id: Math.random().toString(36).substr(2, 9), email, password, name };
-      localStorage.setItem('lumina_users', JSON.stringify([...users, newUser]));
-      onLogin(newUser);
-    } else {
-      setError('Password reset link sent to ' + email);
-      setTimeout(() => setView('signin'), 2000);
+    } catch (err: any) {
+      // Fix: Handle unknown error in catch block
+      setError('An error occurred during authentication');
     }
   };
 
   return (
-    <div className={`fixed inset-0 flex items-center justify-center p-4 z-[200] ${isDark ? 'bg-zinc-950 text-zinc-100' : 'bg-zinc-900 text-white'}`}>
+    <div className={`fixed inset-0 flex items-center justify-center p-4 z-[200] transition-colors duration-500 ${isDark ? 'bg-zinc-950 text-zinc-100' : 'bg-zinc-900 text-white'}`}>
       <div className="absolute inset-0 overflow-hidden opacity-20 pointer-events-none">
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-white rounded-full blur-[120px]" />
         <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-white rounded-full blur-[120px]" />
@@ -319,38 +334,69 @@ export default function App() {
   const [processProgress, setProcessProgress] = useState({ current: 0, total: 0 });
   const [selectedItem, setSelectedItem] = useState<MediaItem | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [darkMode, setDarkMode] = useState(() => localStorage.getItem('lumina_theme') === 'dark');
+  const [darkMode, setDarkMode] = useState(() => {
+    try {
+      return localStorage.getItem('lumina_theme') === 'dark';
+    } catch (e: any) {
+      // Fix: Handle unknown error in catch block
+      return false;
+    }
+  });
 
   // Initialization & Load (IndexedDB sync)
   useEffect(() => {
     const init = async () => {
-      const savedUser = localStorage.getItem('lumina_current_user');
-      if (savedUser) setCurrentUser(JSON.parse(savedUser));
+      try {
+        const savedUser = localStorage.getItem('lumina_current_user');
+        if (savedUser) setCurrentUser(JSON.parse(savedUser));
+      } catch (e: any) {
+        // Fix: Handle unknown error in catch block
+        console.error("User restoration failed", e);
+      }
+      
       try {
         const savedMedia = await getAllMedia();
-        setMedia(savedMedia);
-      } catch (e) {
-        console.error("Failed to load IndexedDB media", e);
+        setMedia(savedMedia || []);
+      } catch (e: any) {
+        // Fix: Handle unknown error in catch block
+        console.error("Media restoration failed", e);
       }
     };
     init();
   }, []);
 
-  // Theme Persistence
+  // Theme Sync with System (Tailwind Dark Mode support)
   useEffect(() => {
-    localStorage.setItem('lumina_theme', darkMode ? 'dark' : 'light');
+    if (darkMode) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    try {
+      localStorage.setItem('lumina_theme', darkMode ? 'dark' : 'light');
+    } catch (e: any) {
+      // Fix: Handle unknown error in catch block
+    }
   }, [darkMode]);
 
   const toggleTheme = () => setDarkMode(!darkMode);
 
   const handleLogin = (user: User) => {
     setCurrentUser(user);
-    localStorage.setItem('lumina_current_user', JSON.stringify(user));
+    try {
+      localStorage.setItem('lumina_current_user', JSON.stringify(user));
+    } catch (e: any) {
+      // Fix: Handle unknown error in catch block
+    }
   };
 
   const handleLogout = () => {
     setCurrentUser(null);
-    localStorage.removeItem('lumina_current_user');
+    try {
+      localStorage.removeItem('lumina_current_user');
+    } catch (e: any) {
+      // Fix: Handle unknown error in catch block
+    }
     setSelectedIds(new Set());
   };
 
@@ -439,7 +485,8 @@ export default function App() {
 
           await saveMediaItem(newItem);
           newItems.push(newItem);
-        } catch (e) {
+        } catch (e: any) {
+          // Fix: Handle unknown error in catch block
           console.error('File storage failed', e);
         }
       }
@@ -462,7 +509,8 @@ export default function App() {
         return next;
       });
       if (selectedItem?.id === id) setSelectedItem(null);
-    } catch (e) {
+    } catch (e: any) {
+      // Fix: Handle unknown error in catch block
       console.error("Delete failed", e);
     }
   };
@@ -474,7 +522,8 @@ export default function App() {
       setMedia(prev => prev.filter(item => !selectedIds.has(item.id)));
       setSelectedIds(new Set());
       if (selectedItem && selectedIds.has(selectedItem.id)) setSelectedItem(null);
-    } catch (e) {
+    } catch (e: any) {
+      // Fix: Handle unknown error in catch block
       console.error("Bulk delete failed", e);
     }
   };
@@ -525,7 +574,7 @@ export default function App() {
              <button onClick={handleLogout} className="p-3 text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-xl transition-all" title="Sign Out">
                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
              </button>
-             <div className={`hidden md:flex w-10 h-10 rounded-full items-center justify-center text-[10px] font-bold uppercase ${darkMode ? 'bg-zinc-800 text-zinc-400' : 'bg-zinc-200 text-zinc-500'}`}>{currentUser.name.charAt(0)}</div>
+             <div className={`hidden md:flex w-10 h-10 rounded-full items-center justify-center text-[10px] font-bold uppercase ${darkMode ? 'bg-zinc-800 text-zinc-400' : 'bg-zinc-200 text-zinc-500'}`}>{currentUser?.name?.charAt(0) || 'U'}</div>
           </div>
         </div>
       </nav>
@@ -544,7 +593,7 @@ export default function App() {
                     </button>
                   )}
                 </h2>
-                <p className="text-zinc-400 text-xs mt-0.5">{filteredMedia.length} items for {currentUser.name}</p>
+                <p className="text-zinc-400 text-xs mt-0.5">{filteredMedia.length} items for {currentUser?.name}</p>
               </div>
               {selectedIds.size > 0 && (
                 <div className={`flex items-center gap-3 pl-4 border-l animate-in slide-in-from-left-2 ${darkMode ? 'border-zinc-800' : 'border-zinc-200'}`}>
