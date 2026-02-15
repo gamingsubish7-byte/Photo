@@ -9,42 +9,84 @@ import {
 
 type GroupingMode = 'none' | 'day' | 'month' | 'year';
 
-// --- DATABASE SERVICE (IndexedDB for Safari-friendly large persistence) ---
+// --- GLOBAL STYLES ---
+const GLOBAL_STYLES = `
+  .animate-in { animation: fadeIn 0.2s ease-out; }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes zoomIn { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+  .zoom-in-95 { animation: zoomIn 0.2s ease-out; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #e4e4e7; border-radius: 10px; }
+  .dark ::-webkit-scrollbar-thumb { background: #3f3f46; }
+  html, body { height: 100%; overflow: hidden; margin: 0; padding: 0; }
+`;
+
+// --- DATABASE SERVICE (IndexedDB for professional persistence) ---
 const DB_NAME = 'LuminaGalleryDB';
-const STORE_NAME = 'media_items';
-const DB_VERSION = 1;
+const MEDIA_STORE = 'media_items';
+const USER_STORE = 'users';
+const DB_VERSION = 2; // Incremented version to add user store
 
 const openDB = (): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
     try {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
-      request.onupgradeneeded = () => {
+      request.onupgradeneeded = (event: any) => {
         const db = request.result;
-        if (!db.objectStoreNames.contains(STORE_NAME)) {
-          db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+        if (!db.objectStoreNames.contains(MEDIA_STORE)) {
+          db.createObjectStore(MEDIA_STORE, { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains(USER_STORE)) {
+          db.createObjectStore(USER_STORE, { keyPath: 'id' });
         }
       };
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     } catch (e: any) {
-      // Fix: Handle unknown error in catch block
       reject(e);
     }
   });
 };
 
+// --- USER OPERATIONS ---
+const saveUserToDB = async (user: User): Promise<void> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(USER_STORE, 'readwrite');
+    const store = transaction.objectStore(USER_STORE);
+    const request = store.put(user);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+};
+
+const findUserInDB = async (email: string): Promise<User | null> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(USER_STORE, 'readonly');
+    const store = transaction.objectStore(USER_STORE);
+    const request = store.getAll();
+    request.onsuccess = () => {
+      const users = request.result as User[];
+      const user = users.find(u => u.email.toLowerCase() === email.toLowerCase());
+      resolve(user || null);
+    };
+    request.onerror = () => reject(request.error);
+  });
+};
+
+// --- MEDIA OPERATIONS ---
 const getAllMedia = async (): Promise<MediaItem[]> => {
   try {
     const db = await openDB();
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction(STORE_NAME, 'readonly');
-      const store = transaction.objectStore(STORE_NAME);
+      const transaction = db.transaction(MEDIA_STORE, 'readonly');
+      const store = transaction.objectStore(MEDIA_STORE);
       const request = store.getAll();
       request.onsuccess = () => resolve(request.result || []);
       request.onerror = () => reject(request.error);
     });
   } catch (e: any) {
-    // Fix: Handle unknown error in catch block
     console.error("DB failed", e);
     return [];
   }
@@ -53,8 +95,8 @@ const getAllMedia = async (): Promise<MediaItem[]> => {
 const saveMediaItem = async (item: MediaItem): Promise<void> => {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, 'readwrite');
-    const store = transaction.objectStore(STORE_NAME);
+    const transaction = db.transaction(MEDIA_STORE, 'readwrite');
+    const store = transaction.objectStore(MEDIA_STORE);
     const request = store.put(item);
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
@@ -64,12 +106,17 @@ const saveMediaItem = async (item: MediaItem): Promise<void> => {
 const deleteMediaItem = async (id: string): Promise<void> => {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, 'readwrite');
-    const store = transaction.objectStore(STORE_NAME);
+    const transaction = db.transaction(MEDIA_STORE, 'readwrite');
+    const store = transaction.objectStore(MEDIA_STORE);
     const request = store.delete(id);
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
   });
+};
+
+// Helper to create a deterministic ID from email
+const getUserIdFromEmail = (email: string) => {
+  return btoa(email.toLowerCase().trim()).replace(/=/g, '').substring(0, 16);
 };
 
 const formatTime = (time: number) => {
@@ -84,38 +131,64 @@ const AuthScreen = ({ onLogin, isDark }: { onLogin: (user: User) => void, isDark
   const [view, setView] = useState<AuthView>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [name, setName] = useState('');
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
 
-  const handleAuth = (e: React.FormEvent) => {
+  const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setSuccess('');
+    setIsLoading(true);
 
     try {
-      const users: User[] = JSON.parse(localStorage.getItem('lumina_users') || '[]');
+      const existingUser = await findUserInDB(email);
 
       if (view === 'signin') {
-        const user = users.find(u => u.email === email && u.password === password);
-        if (user) {
-          onLogin(user);
+        if (existingUser && existingUser.password === password) {
+          onLogin(existingUser);
         } else {
           setError('Invalid email or password');
         }
       } else if (view === 'signup') {
-        if (users.some(u => u.email === email)) {
-          setError('Email already exists');
+        if (existingUser) {
+          setError('Email already registered');
+          setIsLoading(false);
           return;
         }
-        const newUser: User = { id: Math.random().toString(36).substr(2, 9), email, password, name };
-        localStorage.setItem('lumina_users', JSON.stringify([...users, newUser]));
+        const newUser: User = { 
+          id: getUserIdFromEmail(email), 
+          email: email.toLowerCase().trim(), 
+          password, 
+          name 
+        };
+        await saveUserToDB(newUser);
         onLogin(newUser);
-      } else {
-        setError('Password reset link sent to ' + email);
+      } else if (view === 'forgot') {
+        if (!existingUser) {
+          setError('User not found');
+          setIsLoading(false);
+          return;
+        }
+        if (password !== confirmPassword) {
+          setError('Passwords do not match');
+          setIsLoading(false);
+          return;
+        }
+        const updatedUser: User = { 
+          ...existingUser, 
+          password 
+        };
+        await saveUserToDB(updatedUser);
+        setSuccess('Password updated successfully');
         setTimeout(() => setView('signin'), 2000);
       }
     } catch (err: any) {
-      // Fix: Handle unknown error in catch block
-      setError('An error occurred during authentication');
+      setError('Database access error. Please try again.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -131,7 +204,7 @@ const AuthScreen = ({ onLogin, isDark }: { onLogin: (user: User) => void, isDark
           <div className="w-16 h-16 bg-white rounded-2xl flex items-center justify-center text-zinc-900 text-2xl font-black mb-6 shadow-xl">L</div>
           <h1 className="text-3xl font-bold tracking-tight">Lumina Gallery</h1>
           <p className="text-zinc-400 text-sm mt-2">
-            {view === 'signin' ? 'Welcome back' : view === 'signup' ? 'Create your workspace' : 'Reset your access'}
+            {view === 'signin' ? 'Welcome back' : view === 'signup' ? 'Create your workspace' : 'Reset your password'}
           </p>
         </div>
 
@@ -141,7 +214,8 @@ const AuthScreen = ({ onLogin, isDark }: { onLogin: (user: User) => void, isDark
               type="text"
               placeholder="Full Name"
               required
-              className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 text-white outline-none focus:ring-2 focus:ring-white/20 transition-all"
+              disabled={isLoading}
+              className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 text-white outline-none focus:ring-2 focus:ring-white/20 transition-all disabled:opacity-50"
               value={name}
               onChange={e => setName(e.target.value)}
             />
@@ -150,36 +224,51 @@ const AuthScreen = ({ onLogin, isDark }: { onLogin: (user: User) => void, isDark
             type="email"
             placeholder="Email Address"
             required
-            className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 text-white outline-none focus:ring-2 focus:ring-white/20 transition-all"
+            disabled={isLoading}
+            className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 text-white outline-none focus:ring-2 focus:ring-white/20 transition-all disabled:opacity-50"
             value={email}
             onChange={e => setEmail(e.target.value)}
           />
-          {view !== 'forgot' && (
+          <input
+            type="password"
+            placeholder={view === 'forgot' ? 'New Password' : 'Password'}
+            required
+            disabled={isLoading}
+            className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 text-white outline-none focus:ring-2 focus:ring-white/20 transition-all disabled:opacity-50"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+          />
+          {view === 'forgot' && (
             <input
               type="password"
-              placeholder="Password"
+              placeholder="Confirm New Password"
               required
-              className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 text-white outline-none focus:ring-2 focus:ring-white/20 transition-all"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
+              disabled={isLoading}
+              className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 text-white outline-none focus:ring-2 focus:ring-white/20 transition-all disabled:opacity-50"
+              value={confirmPassword}
+              onChange={e => setConfirmPassword(e.target.value)}
             />
           )}
 
-          {error && <p className={`text-sm text-center font-medium ${error.includes('sent') ? 'text-green-400' : 'text-red-400'}`}>{error}</p>}
+          {error && <p className="text-sm text-center font-medium text-red-400">{error}</p>}
+          {success && <p className="text-sm text-center font-medium text-green-400">{success}</p>}
 
-          <button className="w-full bg-white text-zinc-900 py-4 rounded-2xl font-bold hover:scale-[1.02] active:scale-[0.98] transition-all shadow-xl mt-4">
-            {view === 'signin' ? 'Sign In' : view === 'signup' ? 'Create Account' : 'Send Reset Link'}
+          <button 
+            disabled={isLoading}
+            className="w-full bg-white text-zinc-900 py-4 rounded-2xl font-bold hover:scale-[1.02] active:scale-[0.98] transition-all shadow-xl mt-4 disabled:opacity-50 flex items-center justify-center gap-2"
+          >
+            {isLoading ? <div className="w-5 h-5 border-2 border-zinc-900/20 border-t-zinc-900 rounded-full animate-spin" /> : (view === 'signin' ? 'Sign In' : view === 'signup' ? 'Create Account' : 'Reset Password')}
           </button>
         </form>
 
         <div className="mt-8 flex flex-col items-center gap-4">
           {view === 'signin' ? (
             <>
-              <button onClick={() => setView('signup')} className="text-zinc-400 text-sm hover:text-white transition-colors">Don't have an account? <span className="text-white font-bold">Sign Up</span></button>
-              <button onClick={() => setView('forgot')} className="text-zinc-500 text-xs hover:text-zinc-300 transition-colors">Forgot Password?</button>
+              <button onClick={() => { setView('signup'); setError(''); setSuccess(''); }} className="text-zinc-400 text-sm hover:text-white transition-colors">Don't have an account? <span className="text-white font-bold">Sign Up</span></button>
+              <button onClick={() => { setView('forgot'); setError(''); setSuccess(''); }} className="text-zinc-500 text-xs hover:text-zinc-300 transition-colors">Forgot Password?</button>
             </>
           ) : (
-            <button onClick={() => setView('signin')} className="text-zinc-400 text-sm hover:text-white transition-colors">Already have an account? <span className="text-white font-bold">Sign In</span></button>
+            <button onClick={() => { setView('signin'); setError(''); setSuccess(''); }} className="text-zinc-400 text-sm hover:text-white transition-colors">Back to <span className="text-white font-bold">Sign In</span></button>
           )}
         </div>
       </div>
@@ -334,11 +423,11 @@ export default function App() {
   const [processProgress, setProcessProgress] = useState({ current: 0, total: 0 });
   const [selectedItem, setSelectedItem] = useState<MediaItem | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [isInitializing, setIsInitializing] = useState(true);
   const [darkMode, setDarkMode] = useState(() => {
     try {
       return localStorage.getItem('lumina_theme') === 'dark';
     } catch (e: any) {
-      // Fix: Handle unknown error in catch block
       return false;
     }
   });
@@ -346,20 +435,38 @@ export default function App() {
   // Initialization & Load (IndexedDB sync)
   useEffect(() => {
     const init = async () => {
+      // 1. Request persistence from browser
+      if (navigator.storage && navigator.storage.persist) {
+        const isPersisted = await navigator.storage.persist();
+        console.log(`Storage persistence: ${isPersisted ? 'granted' : 'denied'}`);
+      }
+
+      // 2. Restore session from high-capacity DB (not just localStorage)
       try {
-        const savedUser = localStorage.getItem('lumina_current_user');
-        if (savedUser) setCurrentUser(JSON.parse(savedUser));
+        const savedUserStr = localStorage.getItem('lumina_current_user');
+        if (savedUserStr) {
+          const localUser = JSON.parse(savedUserStr);
+          // Verify user still exists in the main database
+          const dbUser = await findUserInDB(localUser.email);
+          if (dbUser) {
+            setCurrentUser(dbUser);
+          } else {
+            // Local user cache exists but DB doesn't have it (weird case), clear local
+            localStorage.removeItem('lumina_current_user');
+          }
+        }
       } catch (e: any) {
-        // Fix: Handle unknown error in catch block
         console.error("User restoration failed", e);
       }
       
+      // 3. Load media
       try {
         const savedMedia = await getAllMedia();
         setMedia(savedMedia || []);
       } catch (e: any) {
-        // Fix: Handle unknown error in catch block
         console.error("Media restoration failed", e);
+      } finally {
+        setIsInitializing(false);
       }
     };
     init();
@@ -374,9 +481,7 @@ export default function App() {
     }
     try {
       localStorage.setItem('lumina_theme', darkMode ? 'dark' : 'light');
-    } catch (e: any) {
-      // Fix: Handle unknown error in catch block
-    }
+    } catch (e: any) {}
   }, [darkMode]);
 
   const toggleTheme = () => setDarkMode(!darkMode);
@@ -384,19 +489,16 @@ export default function App() {
   const handleLogin = (user: User) => {
     setCurrentUser(user);
     try {
+      // Keep a small pointer in localStorage for convenience, but the source of truth is DB
       localStorage.setItem('lumina_current_user', JSON.stringify(user));
-    } catch (e: any) {
-      // Fix: Handle unknown error in catch block
-    }
+    } catch (e: any) {}
   };
 
   const handleLogout = () => {
     setCurrentUser(null);
     try {
       localStorage.removeItem('lumina_current_user');
-    } catch (e: any) {
-      // Fix: Handle unknown error in catch block
-    }
+    } catch (e: any) {}
     setSelectedIds(new Set());
   };
 
@@ -427,6 +529,7 @@ export default function App() {
   const filteredMedia = useMemo(() => {
     if (!currentUser) return [];
     return media.filter(item => {
+      // Deterministic check: owner ID matches current user ID
       const matchesUser = item.userId === currentUser.id;
       const matchesType = currentView === 'upload' ? true : (currentView === 'photos' ? item.type === MediaType.IMAGE : item.type === MediaType.VIDEO);
       const matchesSearch = item.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -472,8 +575,8 @@ export default function App() {
           if (isVideo) duration = await getVideoDuration(base64Data);
 
           const newItem: MediaItem = {
-            id: Math.random().toString(36).substr(2, 9),
-            userId: currentUser.id,
+            id: Math.random().toString(36).substr(2, 12), // High entropy ID for the item
+            userId: currentUser.id, // Deterministic owner ID
             type: isImage ? MediaType.IMAGE : MediaType.VIDEO,
             url: base64Data,
             title: isImage ? 'Photo' : 'Video',
@@ -486,7 +589,6 @@ export default function App() {
           await saveMediaItem(newItem);
           newItems.push(newItem);
         } catch (e: any) {
-          // Fix: Handle unknown error in catch block
           console.error('File storage failed', e);
         }
       }
@@ -510,7 +612,6 @@ export default function App() {
       });
       if (selectedItem?.id === id) setSelectedItem(null);
     } catch (e: any) {
-      // Fix: Handle unknown error in catch block
       console.error("Delete failed", e);
     }
   };
@@ -523,7 +624,6 @@ export default function App() {
       setSelectedIds(new Set());
       if (selectedItem && selectedIds.has(selectedItem.id)) setSelectedItem(null);
     } catch (e: any) {
-      // Fix: Handle unknown error in catch block
       console.error("Bulk delete failed", e);
     }
   };
@@ -551,6 +651,17 @@ export default function App() {
       setSelectedItem(item);
     }
   };
+
+  if (isInitializing) {
+    return (
+      <div className={`fixed inset-0 flex items-center justify-center ${darkMode ? 'bg-zinc-950' : 'bg-zinc-50'}`}>
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-4 border-zinc-400/20 border-t-zinc-400 rounded-full animate-spin" />
+          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400">Restoring Library</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!currentUser) return <AuthScreen onLogin={handleLogin} isDark={darkMode} />;
 
@@ -632,13 +743,13 @@ export default function App() {
                       <div className={`h-2 w-full rounded-full overflow-hidden ${darkMode ? 'bg-zinc-800' : 'bg-zinc-100'}`}>
                         <div className={`h-full transition-all duration-300 rounded-full ${darkMode ? 'bg-white' : 'bg-zinc-900'}`} style={{ width: `${(processProgress.current / processProgress.total) * 100}%` }} />
                       </div>
-                      <p className="text-[10px] text-zinc-400 mt-4 text-center font-bold uppercase tracking-wider">IndexedDB optimized for Safari</p>
+                      <p className="text-[10px] text-zinc-400 mt-4 text-center font-bold uppercase tracking-wider">Syncing to secure user vault</p>
                     </div>
                   </div>
                 )}
                 <div className={`w-12 h-12 rounded-full flex items-center justify-center mb-4 border ${darkMode ? 'bg-zinc-800 border-zinc-700' : 'bg-zinc-50 border-zinc-100'}`}><UploadIcon className="w-6 h-6 text-zinc-400" /></div>
                 <h3 className="text-sm font-bold mb-1">Upload Media</h3>
-                <p className="text-zinc-400 mb-6 max-w-xs text-[11px]">Large files are stored locally in your browser database.</p>
+                <p className="text-zinc-400 mb-6 max-w-xs text-[11px]">Large files are stored locally in your private database.</p>
                 <label className={`cursor-pointer px-5 py-2 rounded-xl font-bold transition-all shadow-md inline-flex items-center gap-2 text-xs ${darkMode ? 'bg-white text-zinc-950 hover:bg-zinc-200' : 'bg-zinc-900 text-white hover:bg-zinc-800'}`}>
                   <UploadIcon className="w-3.5 h-3.5" />
                   Select Files
@@ -715,16 +826,8 @@ export default function App() {
         </div>
       )}
 
-      <style dangerouslySetInnerHTML={{ __html: `
-        .animate-in { animation: fadeIn 0.2s ease-out; }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes zoomIn { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-        .zoom-in-95 { animation: zoomIn 0.2s ease-out; }
-        ::-webkit-scrollbar { width: 6px; }
-        ::-webkit-scrollbar-thumb { background: #e4e4e7; border-radius: 10px; }
-        .dark ::-webkit-scrollbar-thumb { background: #3f3f46; }
-        html, body { height: 100%; overflow: hidden; margin: 0; padding: 0; }
-      `}} />
+      {/* Inject global styles using dangerouslySetInnerHTML */}
+      <style dangerouslySetInnerHTML={{ __html: GLOBAL_STYLES }} />
     </div>
   );
 }
