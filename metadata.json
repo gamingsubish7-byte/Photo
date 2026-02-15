@@ -1,7 +1,5 @@
 {
   "name": "Lumina Gallery",
   "description": "A clean, efficient media library for organizing your personal photos and videos.",
-  "requestFramePermissions": [
-    "camera"
-  ]
+  "requestFramePermissions": []
 }

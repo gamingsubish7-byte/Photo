@@ -21,11 +21,11 @@ const GLOBAL_STYLES = `
   html, body { height: 100%; overflow: hidden; margin: 0; padding: 0; }
 `;
 
-// --- DATABASE SERVICE (IndexedDB for professional persistence) ---
+// --- DATABASE SERVICE ---
 const DB_NAME = 'LuminaGalleryDB';
 const MEDIA_STORE = 'media_items';
 const USER_STORE = 'users';
-const DB_VERSION = 2; // Incremented version to add user store
+const DB_VERSION = 2;
 
 const openDB = (): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
@@ -48,7 +48,6 @@ const openDB = (): Promise<IDBDatabase> => {
   });
 };
 
-// --- USER OPERATIONS ---
 const saveUserToDB = async (user: User): Promise<void> => {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -75,7 +74,6 @@ const findUserInDB = async (email: string): Promise<User | null> => {
   });
 };
 
-// --- MEDIA OPERATIONS ---
 const getAllMedia = async (): Promise<MediaItem[]> => {
   try {
     const db = await openDB();
@@ -114,7 +112,6 @@ const deleteMediaItem = async (id: string): Promise<void> => {
   });
 };
 
-// Helper to create a deterministic ID from email
 const getUserIdFromEmail = (email: string) => {
   return btoa(email.toLowerCase().trim()).replace(/=/g, '').substring(0, 16);
 };
@@ -158,6 +155,11 @@ const AuthScreen = ({ onLogin, isDark }: { onLogin: (user: User) => void, isDark
           setIsLoading(false);
           return;
         }
+        if (password !== confirmPassword) {
+          setError('Passwords do not match');
+          setIsLoading(false);
+          return;
+        }
         const newUser: User = { 
           id: getUserIdFromEmail(email), 
           email: email.toLowerCase().trim(), 
@@ -183,13 +185,24 @@ const AuthScreen = ({ onLogin, isDark }: { onLogin: (user: User) => void, isDark
         };
         await saveUserToDB(updatedUser);
         setSuccess('Password updated successfully');
-        setTimeout(() => setView('signin'), 2000);
+        setTimeout(() => {
+          setView('signin');
+          setPassword('');
+          setConfirmPassword('');
+        }, 1500);
       }
     } catch (err: any) {
-      setError('Database access error. Please try again.');
+      setError('Database connection lost. Please reload.');
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const resetState = () => {
+    setError('');
+    setSuccess('');
+    setPassword('');
+    setConfirmPassword('');
   };
 
   return (
@@ -200,7 +213,7 @@ const AuthScreen = ({ onLogin, isDark }: { onLogin: (user: User) => void, isDark
       </div>
 
       <div className={`w-full max-w-md backdrop-blur-3xl border rounded-[40px] p-8 md:p-12 shadow-2xl animate-in zoom-in-95 duration-500 ${isDark ? 'bg-zinc-900/50 border-white/5' : 'bg-white/10 border-white/10'}`}>
-        <div className="flex flex-col items-center mb-10">
+        <div className="flex flex-col items-center mb-8">
           <div className="w-16 h-16 bg-white rounded-2xl flex items-center justify-center text-zinc-900 text-2xl font-black mb-6 shadow-xl">L</div>
           <h1 className="text-3xl font-bold tracking-tight">Lumina Gallery</h1>
           <p className="text-zinc-400 text-sm mt-2">
@@ -238,10 +251,10 @@ const AuthScreen = ({ onLogin, isDark }: { onLogin: (user: User) => void, isDark
             value={password}
             onChange={e => setPassword(e.target.value)}
           />
-          {view === 'forgot' && (
+          {(view === 'forgot' || view === 'signup') && (
             <input
               type="password"
-              placeholder="Confirm New Password"
+              placeholder="Confirm Password"
               required
               disabled={isLoading}
               className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 text-white outline-none focus:ring-2 focus:ring-white/20 transition-all disabled:opacity-50"
@@ -250,7 +263,7 @@ const AuthScreen = ({ onLogin, isDark }: { onLogin: (user: User) => void, isDark
             />
           )}
 
-          {error && <p className="text-sm text-center font-medium text-red-400">{error}</p>}
+          {error && <p className="text-sm text-center font-medium text-red-400 animate-pulse">{error}</p>}
           {success && <p className="text-sm text-center font-medium text-green-400">{success}</p>}
 
           <button 
@@ -264,11 +277,11 @@ const AuthScreen = ({ onLogin, isDark }: { onLogin: (user: User) => void, isDark
         <div className="mt-8 flex flex-col items-center gap-4">
           {view === 'signin' ? (
             <>
-              <button onClick={() => { setView('signup'); setError(''); setSuccess(''); }} className="text-zinc-400 text-sm hover:text-white transition-colors">Don't have an account? <span className="text-white font-bold">Sign Up</span></button>
-              <button onClick={() => { setView('forgot'); setError(''); setSuccess(''); }} className="text-zinc-500 text-xs hover:text-zinc-300 transition-colors">Forgot Password?</button>
+              <button onClick={() => { setView('signup'); resetState(); }} className="text-zinc-400 text-sm hover:text-white transition-colors">Don't have an account? <span className="text-white font-bold">Sign Up</span></button>
+              <button onClick={() => { setView('forgot'); resetState(); }} className="text-zinc-500 text-xs hover:text-zinc-300 transition-colors">Forgot Password?</button>
             </>
           ) : (
-            <button onClick={() => { setView('signin'); setError(''); setSuccess(''); }} className="text-zinc-400 text-sm hover:text-white transition-colors">Back to <span className="text-white font-bold">Sign In</span></button>
+            <button onClick={() => { setView('signin'); resetState(); }} className="text-zinc-400 text-sm hover:text-white transition-colors">Back to <span className="text-white font-bold">Sign In</span></button>
           )}
         </div>
       </div>
@@ -291,24 +304,17 @@ const CustomVideoPlayer = ({ item, onToggleFullscreen }: { item: MediaItem, onTo
   const togglePlay = (e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     if (!videoRef.current) return;
-    if (isPlaying) {
-      videoRef.current.pause();
-    } else {
-      videoRef.current.play();
-    }
+    if (isPlaying) videoRef.current.pause();
+    else videoRef.current.play();
     setIsPlaying(!isPlaying);
   };
 
   const handleTimeUpdate = () => {
-    if (videoRef.current) {
-      setCurrentTime(videoRef.current.currentTime);
-    }
+    if (videoRef.current) setCurrentTime(videoRef.current.currentTime);
   };
 
   const handleLoadedMetadata = () => {
-    if (videoRef.current) {
-      setDuration(videoRef.current.duration);
-    }
+    if (videoRef.current) setDuration(videoRef.current.duration);
   };
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -325,11 +331,8 @@ const CustomVideoPlayer = ({ item, onToggleFullscreen }: { item: MediaItem, onTo
     const newMuted = !isMuted;
     setIsMuted(newMuted);
     videoRef.current.muted = newMuted;
-    if (newMuted) {
-      setVolume(0);
-    } else {
-      setVolume(videoRef.current.volume || 1);
-    }
+    if (newMuted) setVolume(0);
+    else setVolume(videoRef.current.volume || 1);
   };
 
   const resetControlsTimeout = () => {
@@ -432,39 +435,26 @@ export default function App() {
     }
   });
 
-  // Initialization & Load (IndexedDB sync)
   useEffect(() => {
     const init = async () => {
-      // 1. Request persistence from browser
-      if (navigator.storage && navigator.storage.persist) {
-        const isPersisted = await navigator.storage.persist();
-        console.log(`Storage persistence: ${isPersisted ? 'granted' : 'denied'}`);
-      }
-
-      // 2. Restore session from high-capacity DB (not just localStorage)
       try {
         const savedUserStr = localStorage.getItem('lumina_current_user');
         if (savedUserStr) {
-          const localUser = JSON.parse(savedUserStr);
-          // Verify user still exists in the main database
-          const dbUser = await findUserInDB(localUser.email);
-          if (dbUser) {
-            setCurrentUser(dbUser);
-          } else {
-            // Local user cache exists but DB doesn't have it (weird case), clear local
-            localStorage.removeItem('lumina_current_user');
+          const localUser = JSON.parse(savedUserStr) as User;
+          if (localUser && localUser.email) {
+            const dbUser = await findUserInDB(localUser.email);
+            if (dbUser) setCurrentUser(dbUser);
           }
         }
       } catch (e: any) {
-        console.error("User restoration failed", e);
+        localStorage.removeItem('lumina_current_user');
       }
       
-      // 3. Load media
       try {
         const savedMedia = await getAllMedia();
         setMedia(savedMedia || []);
       } catch (e: any) {
-        console.error("Media restoration failed", e);
+        console.error("Gallery failed", e);
       } finally {
         setIsInitializing(false);
       }
@@ -472,13 +462,9 @@ export default function App() {
     init();
   }, []);
 
-  // Theme Sync with System (Tailwind Dark Mode support)
   useEffect(() => {
-    if (darkMode) {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
+    if (darkMode) document.documentElement.classList.add('dark');
+    else document.documentElement.classList.remove('dark');
     try {
       localStorage.setItem('lumina_theme', darkMode ? 'dark' : 'light');
     } catch (e: any) {}
@@ -489,7 +475,6 @@ export default function App() {
   const handleLogin = (user: User) => {
     setCurrentUser(user);
     try {
-      // Keep a small pointer in localStorage for convenience, but the source of truth is DB
       localStorage.setItem('lumina_current_user', JSON.stringify(user));
     } catch (e: any) {}
   };
@@ -502,10 +487,7 @@ export default function App() {
     setSelectedIds(new Set());
   };
 
-  const formatDuration = (seconds?: number) => {
-    if (seconds === undefined) return '';
-    return formatTime(seconds);
-  };
+  const formatDuration = (seconds?: number) => formatTime(seconds || 0);
 
   const getVideoDuration = (url: string): Promise<number> => {
     return new Promise((resolve) => {
@@ -529,7 +511,6 @@ export default function App() {
   const filteredMedia = useMemo(() => {
     if (!currentUser) return [];
     return media.filter(item => {
-      // Deterministic check: owner ID matches current user ID
       const matchesUser = item.userId === currentUser.id;
       const matchesType = currentView === 'upload' ? true : (currentView === 'photos' ? item.type === MediaType.IMAGE : item.type === MediaType.VIDEO);
       const matchesSearch = item.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -558,6 +539,7 @@ export default function App() {
     if (!files || files.length === 0 || !currentUser) return;
 
     setIsProcessing(true);
+    // Explicitly cast to File[] to fix unknown type issues in iteration
     const fileList = Array.from(files) as File[];
     setProcessProgress({ current: 0, total: fileList.length });
     
@@ -575,12 +557,12 @@ export default function App() {
           if (isVideo) duration = await getVideoDuration(base64Data);
 
           const newItem: MediaItem = {
-            id: Math.random().toString(36).substr(2, 12), // High entropy ID for the item
-            userId: currentUser.id, // Deterministic owner ID
+            id: Math.random().toString(36).substring(2, 15),
+            userId: currentUser.id,
             type: isImage ? MediaType.IMAGE : MediaType.VIDEO,
             url: base64Data,
             title: isImage ? 'Photo' : 'Video',
-            description: `Captured on ${new Date().toLocaleDateString()}`,
+            description: `Captured ${new Date().toLocaleDateString()}`,
             tags: [],
             timestamp: Date.now(),
             duration
@@ -611,21 +593,18 @@ export default function App() {
         return next;
       });
       if (selectedItem?.id === id) setSelectedItem(null);
-    } catch (e: any) {
-      console.error("Delete failed", e);
-    }
+    } catch (e: any) {}
   };
 
   const handleBulkDelete = async () => {
-    const idsToDelete = Array.from(selectedIds);
+    // Explicitly cast to string[] to fix unknown type issues in mapping
+    const idsToDelete = Array.from(selectedIds) as string[];
     try {
       await Promise.all(idsToDelete.map(id => deleteMediaItem(id)));
       setMedia(prev => prev.filter(item => !selectedIds.has(item.id)));
       setSelectedIds(new Set());
       if (selectedItem && selectedIds.has(selectedItem.id)) setSelectedItem(null);
-    } catch (e: any) {
-      console.error("Bulk delete failed", e);
-    }
+    } catch (e: any) {}
   };
 
   const handleSelectAll = () => {
@@ -657,7 +636,7 @@ export default function App() {
       <div className={`fixed inset-0 flex items-center justify-center ${darkMode ? 'bg-zinc-950' : 'bg-zinc-50'}`}>
         <div className="flex flex-col items-center gap-4">
           <div className="w-12 h-12 border-4 border-zinc-400/20 border-t-zinc-400 rounded-full animate-spin" />
-          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400">Restoring Library</p>
+          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400">Loading your space</p>
         </div>
       </div>
     );
@@ -667,7 +646,6 @@ export default function App() {
 
   return (
     <div className={`h-screen h-[100dvh] w-screen flex flex-col md:flex-row overflow-hidden fixed inset-0 transition-colors duration-300 ${darkMode ? 'bg-zinc-950 text-zinc-100 dark' : 'bg-zinc-50 text-zinc-900'}`}>
-      {/* Sidebar Navigation */}
       <nav className={`fixed bottom-0 left-0 right-0 z-50 backdrop-blur-lg border-t p-2 md:relative md:w-20 md:h-full md:border-t-0 md:border-r md:p-4 md:flex-shrink-0 transition-colors duration-300 ${darkMode ? 'bg-zinc-900/80 border-zinc-800' : 'bg-white/80 border-zinc-200'}`}>
         <div className="flex flex-row justify-around md:flex-col md:gap-6 h-full items-center">
           <div className="hidden md:flex flex-col items-center mb-4">
@@ -690,7 +668,6 @@ export default function App() {
         </div>
       </nav>
 
-      {/* Main Content Area */}
       <main className="flex-1 overflow-y-auto scroll-smooth pb-20 md:pb-0 h-full">
         <div className="max-w-7xl mx-auto p-4 md:p-8">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
@@ -743,7 +720,7 @@ export default function App() {
                       <div className={`h-2 w-full rounded-full overflow-hidden ${darkMode ? 'bg-zinc-800' : 'bg-zinc-100'}`}>
                         <div className={`h-full transition-all duration-300 rounded-full ${darkMode ? 'bg-white' : 'bg-zinc-900'}`} style={{ width: `${(processProgress.current / processProgress.total) * 100}%` }} />
                       </div>
-                      <p className="text-[10px] text-zinc-400 mt-4 text-center font-bold uppercase tracking-wider">Syncing to secure user vault</p>
+                      <p className="text-[10px] text-zinc-400 mt-4 text-center font-bold uppercase tracking-wider">Storage space managed by IndexedDB</p>
                     </div>
                   </div>
                 )}
@@ -798,8 +775,8 @@ export default function App() {
                <div className={`w-20 h-20 rounded-full flex items-center justify-center mb-6 border ${darkMode ? 'bg-zinc-900 border-zinc-800' : 'bg-zinc-100 border-zinc-200/50'}`}>
                   {currentView === 'photos' ? <ImageIcon className="w-10 h-10 opacity-40 text-zinc-400" /> : <VideoIcon className="w-10 h-10 opacity-40 text-zinc-400" />}
                </div>
-               <h3 className="text-lg font-bold text-zinc-400 mb-1">No {currentView} yet</h3>
-               <p className="max-w-xs text-sm text-zinc-400 font-medium">Your library is currently empty. Start by uploading some memories!</p>
+               <h3 className="text-lg font-bold text-zinc-400 mb-1">Empty Vault</h3>
+               <p className="max-w-xs text-sm text-zinc-400 font-medium">Your collection is waiting for its first item. Upload something to get started!</p>
             </div>
           )}
         </div>
@@ -812,12 +789,20 @@ export default function App() {
               {selectedItem.type === MediaType.IMAGE ? (
                 <img src={selectedItem.url} alt="" className="max-w-full max-h-full object-contain shadow-2xl rounded-sm" />
               ) : (
-                <CustomVideoPlayer item={selectedItem} onToggleFullscreen={() => { const video = document.querySelector('video.max-w-full') as HTMLVideoElement; if (video?.requestFullscreen) video.requestFullscreen(); }} />
+                <CustomVideoPlayer item={selectedItem} onToggleFullscreen={() => { 
+                  const video = document.querySelector('video.max-w-full') as HTMLVideoElement;
+                  if (video?.requestFullscreen) video.requestFullscreen();
+                }} />
               )}
             </div>
             <div className="absolute top-4 right-4 flex items-center gap-2 z-50">
-              <button onClick={() => { const link = document.createElement('a'); link.href = selectedItem.url; link.download = `${selectedItem.type}_${selectedItem.id}`; link.click(); }} className="bg-white/10 hover:bg-white/20 p-2.5 rounded-full text-white transition-all backdrop-blur-md"><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg></button>
-              <button className="bg-white/10 hover:bg-white/20 p-2.5 rounded-full text-white transition-all backdrop-blur-md" onClick={() => setSelectedItem(null)}><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>
+              <button onClick={() => { 
+                const link = document.createElement('a');
+                link.href = selectedItem.url;
+                link.download = `${selectedItem.type}_${selectedItem.id}`;
+                link.click();
+              }} className="bg-white/10 hover:bg-white/20 p-2.5 rounded-full text-white transition-all backdrop-blur-md" title="Download"><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg></button>
+              <button className="bg-white/10 hover:bg-white/20 p-2.5 rounded-full text-white transition-all backdrop-blur-md" onClick={() => setSelectedItem(null)} title="Close"><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>
             </div>
             <div className="absolute bottom-10 left-1/2 -translate-x-1/2 px-6 py-3 bg-black/50 backdrop-blur-xl border border-white/10 rounded-full text-white/70 text-[10px] font-bold tracking-widest uppercase pointer-events-none">
               {selectedItem.description} {selectedItem.type === MediaType.VIDEO && `• ${formatTime(selectedItem.duration || 0)}`}
@@ -826,8 +811,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Inject global styles using dangerouslySetInnerHTML */}
-      <style dangerouslySetInnerHTML={{ __html: GLOBAL_STYLES }} />
+      <style dangerouslySetInnerHTML={{ __html: String(GLOBAL_STYLES) }} />
     </div>
   );
 }
