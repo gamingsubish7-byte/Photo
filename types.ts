@@ -7,21 +7,21 @@ export enum MediaType {
 export interface User {
   id: string;
   email: string;
-  password?: string; // In a real app, never store plain text or even return it
   name: string;
+  accessToken?: string;
+  driveFolderId?: string;
 }
 
 export interface MediaItem {
-  id: string;
-  userId: string; // Ownership link
+  id: string; // The Google Drive File ID
+  userId: string;
   type: MediaType;
-  url: string; // This will store the Base64 data for persistence
+  url: string; // Temporary webContentLink or thumbnailLink
   title: string;
   description: string;
-  tags: string[];
   timestamp: number;
   duration?: number;
 }
 
-export type ViewType = 'photos' | 'videos' | 'upload';
-export type AuthView = 'signin' | 'signup' | 'forgot';
+export type ViewType = 'photos' | 'videos' | 'upload' | 'landing';
+export type AuthView = 'landing' | 'options' | 'email-signin' | 'email-signup';

@@ -4,8 +4,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Lumina Gallery</title>
+    <title>Lumina Galaxy</title>
     <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-2150011243314237" crossorigin="anonymous"></script>
+    <!-- Google Identity Services and GAPI -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script src="https://apis.google.com/js/api.js" async defer></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script type="importmap">
 {
@@ -19,14 +22,13 @@
 }
 </script>
     <style>
-        /* Prevents layout shift during theme load */
         html.dark { background-color: #09090b; color: #f4f4f5; }
         html { background-color: #fafafa; color: #18181b; }
+        body { margin: 0; padding: 0; }
     </style>
 </head>
 <body>
     <div id="root"></div>
-    <!-- Explicitly load the entry point -->
     <script type="module" src="index.tsx"></script>
 </body>
 </html>
