@@ -84,3 +84,10 @@ export const MoonIcon = ({ className }: { className?: string }) => (
     <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
   </svg>
 );
+
+export const WhatsAppIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 1 1-7.6-11.7 8.38 8.38 0 0 1 3.8.9L21 3l-1.5 4.5Z" />
+    <path d="M12 12v.01" />
+  </svg>
+);
