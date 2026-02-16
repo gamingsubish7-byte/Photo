@@ -8,10 +8,8 @@ import {
 
 // --- CONSTANTS ---
 const BASE_STORAGE_BYTES = 2.5 * 1024 * 1024 * 1024; // 2.5 GB
-const BONUS_PER_CHECKIN = 5 * 1024 * 1024; // 5 MB
-const PENALTY_PER_MISS = 75 * 1024 * 1024; // 75 MB
-const UNLOCK_CREDIT_REQUIREMENT = 50 * 1024 * 1024; // 50 MB
-const SURVIVAL_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 Hours
+const BONUS_PER_CHECKIN = 2 * 1024 * 1024; // 2 MB
+const UPLOAD_BUFFER_BYTES = 20 * 1024 * 1024; // 20 MB Buffer needed to unlock
 const INITIAL_QUEUE_DELAY = 2 * 60 * 1000; // 2 minutes
 const SEQUENTIAL_DELAY = 2000; // 2 seconds
 
@@ -30,8 +28,6 @@ const GLOBAL_STYLES = `
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
   .glow-blue { box-shadow: 0 0 20px rgba(59, 130, 246, 0.3); }
   .glow-red { box-shadow: 0 0 20px rgba(239, 68, 68, 0.3); }
-  .survival-flash { animation: survivalFlash 1s infinite alternate; }
-  @keyframes survivalFlash { from { background-color: #ef4444; } to { background-color: #b91c1c; } }
 `;
 
 // --- DATABASE SERVICE ---
@@ -72,7 +68,7 @@ const saveUserToDB = async (user: User): Promise<void> => {
   });
 };
 
-const findUserInDB = async (email: string): Promise<User | null> => {
+const findUserByEmail = async (email: string): Promise<User | null> => {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(USER_STORE, 'readonly');
@@ -125,16 +121,6 @@ const deleteMediaItem = async (id: string): Promise<void> => {
   });
 };
 
-const getUserIdFromEmail = (email: string) => {
-  return btoa(email.toLowerCase().trim()).replace(/=/g, '').substring(0, 16);
-};
-
-const formatTime = (time: number) => {
-  const mins = Math.floor(time / 60);
-  const secs = Math.floor(time % 60);
-  return `${mins}:${secs.toString().padStart(2, '0')}`;
-};
-
 const formatBytes = (bytes: number, decimals = 2) => {
   if (bytes === 0) return '0 Bytes';
   const k = 1024;
@@ -144,6 +130,16 @@ const formatBytes = (bytes: number, decimals = 2) => {
   const i = Math.floor(Math.log(absBytes) / Math.log(k));
   const prefix = bytes < 0 ? '-' : '';
   return prefix + parseFloat((absBytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+};
+
+const formatTime = (time: number) => {
+  const mins = Math.floor(time / 60);
+  const secs = Math.floor(time % 60);
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+};
+
+const getUserIdFromEmail = (email: string) => {
+  return btoa(email.toLowerCase().trim()).replace(/=/g, '').substring(0, 16);
 };
 
 // --- AUTH COMPONENTS ---
@@ -165,7 +161,7 @@ const AuthScreen = ({ onLogin, isDark }: { onLogin: (user: User) => void, isDark
     setIsLoading(true);
 
     try {
-      const existingUser = await findUserInDB(email);
+      const existingUser = await findUserByEmail(email);
 
       if (view === 'signin') {
         if (existingUser && existingUser.password === password) {
@@ -191,8 +187,8 @@ const AuthScreen = ({ onLogin, isDark }: { onLogin: (user: User) => void, isDark
           name,
           checkInStreak: 0,
           bonusStorage: 0,
-          unlockCreditsNeeded: 0,
-          lastCheckIn: Date.now() 
+          lastCheckIn: 0,
+          isStorageLocked: false
         };
         await saveUserToDB(newUser);
         onLogin(newUser);
@@ -208,7 +204,7 @@ const AuthScreen = ({ onLogin, isDark }: { onLogin: (user: User) => void, isDark
         setTimeout(() => setView('signin'), 1500);
       }
     } catch (err: any) {
-      setError('Database connection lost. Please reload.');
+      setError('Database error. Please reload.');
     } finally {
       setIsLoading(false);
     }
@@ -300,7 +296,7 @@ const CustomVideoPlayer = ({ item, onToggleFullscreen }: { item: MediaItem, onTo
 
   return (
     <div className="relative w-full h-full flex items-center justify-center group/player overflow-hidden cursor-default" onMouseMove={resetControlsTimeout} onClick={togglePlay}>
-      <video ref={videoRef} key={item.url} src={item.url} className="max-w-full max-h-full object-contain bg-black" autoPlay playsInline onTimeUpdate={handleTimeUpdate} onLoadedMetadata={handleLoadedMetadata} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} />
+      <video ref={videoRef} key={item.url} src={item.url} className="max-w-full h-full object-contain bg-black" autoPlay playsInline onTimeUpdate={handleTimeUpdate} onLoadedMetadata={handleLoadedMetadata} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} />
       <div className={`absolute inset-x-0 bottom-0 p-8 transition-all duration-300 transform ${showControls ? 'translate-y-0 opacity-100' : 'translate-y-10 opacity-0 pointer-events-none'}`} onClick={(e) => e.stopPropagation()}>
         <div className="max-w-4xl mx-auto bg-black/40 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl">
           <div className="relative group/range mb-4 flex items-center gap-4">
@@ -347,112 +343,40 @@ export default function App() {
     return BASE_STORAGE_BYTES + (currentUser?.bonusStorage || 0);
   }, [currentUser]);
 
-  // --- STORAGE CALCULATION ---
-  const getStorageUsed = (user: User, items: MediaItem[]) => {
-    return items
-      .filter(item => item.userId === user.id)
-      .reduce((acc, item) => acc + (item.url?.length || 0), 0);
-  };
-
   const currentStorageUsed = useMemo(() => {
     if (!currentUser) return 0;
-    return getStorageUsed(currentUser, media);
+    return media
+      .filter(item => item.userId === currentUser.id)
+      .reduce((acc, item) => acc + (item.url?.length || 0), 0);
   }, [media, currentUser]);
 
   const storagePercentage = useMemo(() => {
     return Math.min((currentStorageUsed / totalStorageLimit) * 100, 100);
   }, [currentStorageUsed, totalStorageLimit]);
 
-  // --- READ ONLY MODE LOGIC ---
-  const isReadOnly = useMemo(() => {
-    if (!currentUser) return false;
-    return currentStorageUsed >= totalStorageLimit || (currentUser.unlockCreditsNeeded || 0) > 0;
-  }, [currentStorageUsed, totalStorageLimit, currentUser]);
-
-  // Handle detection of hitting limit
-  useEffect(() => {
-    if (currentUser && currentStorageUsed >= totalStorageLimit && (currentUser.unlockCreditsNeeded || 0) === 0) {
-      const updatedUser = { ...currentUser, unlockCreditsNeeded: UNLOCK_CREDIT_REQUIREMENT };
-      setCurrentUser(updatedUser);
-      saveUserToDB(updatedUser);
-      localStorage.setItem('lumina_current_user', JSON.stringify(updatedUser));
-    }
+  const isFull = useMemo(() => {
+    return currentStorageUsed >= totalStorageLimit;
   }, [currentStorageUsed, totalStorageLimit]);
 
-  // --- DAILY CHECK-IN CHECKER ---
-  const applyDailyLogic = async (user: User, currentMedia: MediaItem[]): Promise<{ user: User, mediaReset: boolean }> => {
-    if (!user.lastCheckIn) return { user, mediaReset: false };
-    
-    const now = Date.now();
-    const todayStart = new Date(new Date(now).getFullYear(), new Date(now).getMonth(), new Date(now).getDate()).getTime();
-    
-    const lastCheckInDate = new Date(user.lastCheckIn);
-    const lastStart = new Date(lastCheckInDate.getFullYear(), lastCheckInDate.getMonth(), lastCheckInDate.getDate()).getTime();
-    
-    const diffDays = Math.floor((todayStart - lastStart) / (1000 * 60 * 60 * 24));
-    
-    if (diffDays >= 2) {
-      const usedSpace = getStorageUsed(user, currentMedia);
-      const storageLimit = BASE_STORAGE_BYTES + (user.bonusStorage || 0);
+  const canUpload = useMemo(() => {
+    if (!currentUser) return false;
+    if (currentUser.isStorageLocked) return false;
+    return (totalStorageLimit - currentStorageUsed) > 0;
+  }, [currentUser, currentStorageUsed, totalStorageLimit]);
 
-      // Survival Logic: If user is already in survival mode and misses ANOTHER day
-      if (user.survivalModeTimestamp && (now - user.survivalModeTimestamp > SURVIVAL_WINDOW_MS)) {
-        // WIPE DATA
-        const userMedia = currentMedia.filter(item => item.userId === user.id);
-        for (const item of userMedia) {
-          await deleteMediaItem(item.id);
-        }
-        const updatedUser = { 
-          ...user, 
-          bonusStorage: 0,
-          checkInStreak: 0,
-          unlockCreditsNeeded: 0,
-          survivalModeTimestamp: undefined,
-          lastCheckIn: now 
-        };
-        await saveUserToDB(updatedUser);
-        window.alert(`SURVIVAL FAILED: You missed your 24-hour survival window. Your gallery has been wiped.`);
-        return { user: updatedUser, mediaReset: true };
-      }
-
-      // Shielded full accounts don't take new penalties
-      if (usedSpace >= storageLimit || (user.unlockCreditsNeeded || 0) > 0) {
-        const updatedUser = { ...user, checkInStreak: 0, lastCheckIn: now };
-        await saveUserToDB(updatedUser);
-        return { user: updatedUser, mediaReset: false };
-      }
-
-      const missedDaysCount = diffDays - 1; 
-      const totalPenalty = missedDaysCount * PENALTY_PER_MISS;
-      const potentialBonus = (user.bonusStorage || 0) - totalPenalty;
-      const potentialLimit = BASE_STORAGE_BYTES + potentialBonus;
-
-      // Survival Initiation: Instead of instant wipe, trigger survival mode
-      if (usedSpace > potentialLimit) {
-        const updatedUser = { 
-          ...user, 
-          bonusStorage: potentialBonus, // Still apply the storage reduction
-          checkInStreak: 0,
-          survivalModeTimestamp: now,
-          lastCheckIn: now 
-        };
-        await saveUserToDB(updatedUser);
-        window.alert(`CRITICAL OVERFLOW: Your storage has shrunk below your usage! SURVIVAL MODE ACTIVE. Check in within 24 hours to spare your gallery.`);
-        return { user: updatedUser, mediaReset: false };
-      } else {
-        const updatedUser = { 
-          ...user, 
-          bonusStorage: potentialBonus,
-          checkInStreak: 0,
-          lastCheckIn: now 
-        };
-        await saveUserToDB(updatedUser);
-        window.alert(`PENALTY: Missed ${missedDaysCount} check-in(s). Storage reduced.`);
-        return { user: updatedUser, mediaReset: false };
-      }
+  // Handle auto-lock
+  useEffect(() => {
+    if (currentUser && isFull && !currentUser.isStorageLocked) {
+      setCurrentUser(prev => {
+        if (!prev) return null;
+        const updated = { ...prev, isStorageLocked: true };
+        saveUserToDB(updated);
+        localStorage.setItem('lumina_current_user', JSON.stringify(updated));
+        return updated;
+      });
+      window.alert("Storage Limit Reached! Earn a 20MB buffer via check-ins to resume.");
     }
-    return { user, mediaReset: false };
-  };
+  }, [isFull, currentUser]);
 
   useEffect(() => {
     const init = async () => {
@@ -462,14 +386,10 @@ export default function App() {
         setMedia(savedMedia || []);
         
         if (savedUserStr) {
-          let user = JSON.parse(savedUserStr);
-          const result = await applyDailyLogic(user, savedMedia || []);
-          setCurrentUser(result.user);
-          localStorage.setItem('lumina_current_user', JSON.stringify(result.user));
-          
-          if (result.mediaReset) {
-            setMedia(prev => prev.filter(item => item.userId !== result.user.id));
-          }
+          const cachedUser = JSON.parse(savedUserStr);
+          // Prioritize Fresh DB Data over localStorage cache
+          const dbUser = await findUserByEmail(cachedUser.email);
+          setCurrentUser(dbUser || cachedUser);
         }
       } catch (e: any) { console.error("Gallery failed", e); }
       finally { setIsInitializing(false); }
@@ -498,37 +418,69 @@ export default function App() {
 
   const handleLogin = async (user: User) => {
     const savedMedia = await getAllMedia();
-    const result = await applyDailyLogic(user, savedMedia);
-    setCurrentUser(result.user);
-    localStorage.setItem('lumina_current_user', JSON.stringify(result.user));
-    if (result.mediaReset) {
-      setMedia(prev => prev.filter(item => item.userId !== result.user.id));
-    } else {
-      setMedia(savedMedia);
-    }
+    setCurrentUser(user);
+    localStorage.setItem('lumina_current_user', JSON.stringify(user));
+    setMedia(savedMedia);
   };
 
   const handleLogout = () => {
     setCurrentUser(null);
     localStorage.removeItem('lumina_current_user');
-    setSelectedIds(new Set());
-    setIsSelectionMode(false);
     setPendingFiles([]);
     setQueueTimeLeft(0);
   };
 
-  const filteredMedia = useMemo<MediaItem[]>(() => {
-    if (!currentUser) return [];
-    return media.filter(item => {
-      const matchesUser = item.userId === currentUser.id;
-      const matchesType = currentView === 'photos' ? item.type === MediaType.IMAGE : item.type === MediaType.VIDEO;
-      const matchesSearch = item.title.toLowerCase().includes(searchQuery.toLowerCase());
-      return matchesUser && matchesType && matchesSearch;
-    }).sort((a, b) => b.timestamp - a.timestamp);
-  }, [media, currentView, searchQuery, currentUser]);
+  const handleCheckIn = async () => {
+    if (!currentUser) return;
+    
+    // Use functional state to guarantee we update the absolute latest object
+    setCurrentUser(prev => {
+      if (!prev) return null;
+      
+      const now = Date.now();
+      const lastCheckIn = prev.lastCheckIn || 0;
+      
+      const todayStr = new Date(now).toDateString();
+      const lastStr = new Date(lastCheckIn).toDateString();
+      
+      if (todayStr === lastStr) {
+        window.alert("You've already checked in today! Streak: " + (prev.checkInStreak || 0));
+        return prev;
+      }
+      
+      const newStreak = (prev.checkInStreak || 0) + 1;
+      const newBonus = (prev.bonusStorage || 0) + BONUS_PER_CHECKIN;
+      const newLimit = BASE_STORAGE_BYTES + newBonus;
+      
+      const isBufferSatisfied = (newLimit - currentStorageUsed) >= UPLOAD_BUFFER_BYTES;
+      const shouldUnlock = prev.isStorageLocked && isBufferSatisfied;
+
+      const updated: User = {
+        ...prev,
+        lastCheckIn: now,
+        checkInStreak: newStreak,
+        bonusStorage: newBonus,
+        isStorageLocked: shouldUnlock ? false : prev.isStorageLocked
+      };
+      
+      // Persist immediately
+      saveUserToDB(updated).catch(console.error);
+      localStorage.setItem('lumina_current_user', JSON.stringify(updated));
+      
+      let msg = `Success! +2MB Added. Total Bonus: ${formatBytes(newBonus)}. Current Streak: ${newStreak}`;
+      if (shouldUnlock) msg += "\n\nUnlocked! Buffer satisfied. You can upload again.";
+      else if (prev.isStorageLocked) {
+        const remaining = UPLOAD_BUFFER_BYTES - (newLimit - currentStorageUsed);
+        msg += `\n\nStill Locked. Need ${formatBytes(remaining)} more buffer space.`;
+      }
+      window.alert(msg);
+      
+      return updated;
+    });
+  };
 
   const processFileItem = async (file: File) => {
-    if (!currentUser || isReadOnly) return null;
+    if (!currentUser || !canUpload) return null;
     const isImage = file.type.startsWith('image/');
     const isVideo = file.type.startsWith('video/');
     
@@ -540,15 +492,9 @@ export default function App() {
       });
 
       const isDuplicate = media.some(item => item.userId === currentUser.id && item.url === base64Data);
-      
       if (isDuplicate) {
         setDuplicateCount(prev => prev + 1);
         return { status: 'duplicate' };
-      }
-
-      if (currentStorageUsed + base64Data.length > totalStorageLimit) {
-        window.alert(`Limit reached! Space required.`);
-        return null;
       }
 
       const newItem: MediaItem = {
@@ -568,8 +514,8 @@ export default function App() {
   };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (isReadOnly) {
-      window.alert("Storage is Read-Only.");
+    if (!canUpload) {
+      window.alert(currentUser?.isStorageLocked ? "Storage is Locked. Earn a 20MB buffer to resume." : "Storage is full.");
       return;
     }
     const files = event.target.files;
@@ -580,7 +526,6 @@ export default function App() {
     const queuedFiles = fileList.slice(2);
 
     setProcessProgress({ current: 0, total: fileList.length });
-    setDuplicateCount(0);
     setIsProcessing(true);
 
     const immediateResults: MediaItem[] = [];
@@ -619,41 +564,15 @@ export default function App() {
     }
   };
 
-  const handleCheckIn = async () => {
-    if (!currentUser) return;
-    const now = Date.now();
-    const last = currentUser.lastCheckIn ? new Date(currentUser.lastCheckIn) : null;
-    
-    const todayStr = new Date(new Date(now).getFullYear(), new Date(now).getMonth(), new Date(now).getDate()).getTime();
-    const lastDayStr = last ? new Date(last.getFullYear(), last.getMonth(), last.getDate()).getTime() : 0;
-    
-    if (todayStr === lastDayStr) {
-      window.alert("Already checked in today!");
-      return;
-    }
-    
-    const wasInSurvival = !!currentUser.survivalModeTimestamp;
-    const newUnlockCredits = Math.max(0, (currentUser.unlockCreditsNeeded || 0) - BONUS_PER_CHECKIN);
-    
-    const updatedUser = {
-      ...currentUser,
-      lastCheckIn: now,
-      checkInStreak: (currentUser.checkInStreak || 0) + 1,
-      bonusStorage: (currentUser.bonusStorage || 0) + BONUS_PER_CHECKIN,
-      unlockCreditsNeeded: newUnlockCredits,
-      survivalModeTimestamp: undefined // Clearing survival mode on check-in
-    };
-    
-    await saveUserToDB(updatedUser);
-    setCurrentUser(updatedUser);
-    localStorage.setItem('lumina_current_user', JSON.stringify(updatedUser));
-    
-    if (wasInSurvival) {
-      window.alert(`SURVIVED! You checked in in time. Your gallery has been spared.`);
-    } else {
-      window.alert(`Checked In! +5MB Bonus.`);
-    }
-  };
+  const filteredMedia = useMemo<MediaItem[]>(() => {
+    if (!currentUser) return [];
+    return media.filter(item => {
+      const matchesUser = item.userId === currentUser.id;
+      const matchesType = currentView === 'photos' ? item.type === MediaType.IMAGE : item.type === MediaType.VIDEO;
+      const matchesSearch = item.title.toLowerCase().includes(searchQuery.toLowerCase());
+      return matchesUser && matchesType && matchesSearch;
+    }).sort((a, b) => b.timestamp - a.timestamp);
+  }, [media, currentView, searchQuery, currentUser]);
 
   const cleanDuplicates = async () => {
     if (!currentUser) return;
@@ -677,12 +596,19 @@ export default function App() {
     if (!currentUser) return;
     if (!window.confirm("Wipe ALL media permanently?")) return;
     const userMedia = media.filter(item => item.userId === currentUser.id);
-    for (const item of userMedia) await deleteMediaItem(item.id);
+    for (const item of userMedia) {
+      await deleteMediaItem(item.id);
+    }
     setMedia(prev => prev.filter(item => item.userId !== currentUser.id));
-    const updatedUser = { ...currentUser, unlockCreditsNeeded: 0, survivalModeTimestamp: undefined };
-    setCurrentUser(updatedUser);
-    saveUserToDB(updatedUser);
-    localStorage.setItem('lumina_current_user', JSON.stringify(updatedUser));
+    
+    setCurrentUser(prev => {
+      if (!prev) return null;
+      const updated = { ...prev, isStorageLocked: false };
+      saveUserToDB(updated);
+      localStorage.setItem('lumina_current_user', JSON.stringify(updated));
+      return updated;
+    });
+    window.alert("Library wiped. Storage unlocked.");
   };
 
   const deleteItem = async (id: string, e?: React.MouseEvent) => {
@@ -705,19 +631,10 @@ export default function App() {
   if (isInitializing) return <div className="fixed inset-0 flex items-center justify-center bg-zinc-950 text-white font-black text-2xl animate-pulse">LUMINA</div>;
   if (!currentUser) return <AuthScreen onLogin={handleLogin} isDark={darkMode} />;
 
-  const isSurvivalActive = !!currentUser.survivalModeTimestamp;
-
   return (
     <div className={`h-screen h-[100dvh] w-screen flex flex-col md:flex-row overflow-hidden fixed inset-0 transition-colors duration-300 ${darkMode ? 'bg-zinc-950 text-zinc-100 dark' : 'bg-zinc-50 text-zinc-900'}`}>
       
-      {/* Survival Alert Banner */}
-      {isSurvivalActive && (
-        <div className="fixed top-0 inset-x-0 z-[100] survival-flash text-white p-3 text-center text-xs font-black uppercase tracking-[0.2em] shadow-xl">
-          ⚠️ Survival Mode Active: Claim 5MB Check-in to Spare Gallery ⚠️
-        </div>
-      )}
-
-      <nav className={`fixed bottom-0 left-0 right-0 z-[60] backdrop-blur-lg border-t p-2 md:relative md:w-24 md:h-full md:border-r md:p-4 flex md:flex-col items-center justify-around transition-colors ${darkMode ? 'bg-zinc-900/80 border-zinc-800' : 'bg-white/80 border-zinc-200'} ${isSurvivalActive ? 'mt-10' : ''}`}>
+      <nav className={`fixed bottom-0 left-0 right-0 z-[60] backdrop-blur-lg border-t p-2 md:relative md:w-24 md:h-full md:border-r md:p-4 flex md:flex-col items-center justify-around transition-colors ${darkMode ? 'bg-zinc-900/80 border-zinc-800' : 'bg-white/80 border-zinc-200'}`}>
         <div className="hidden md:flex w-12 h-12 bg-white text-black rounded-2xl items-center justify-center font-black text-xl mb-8 shadow-lg">L</div>
         <button onClick={() => setCurrentView('photos')} className={`p-4 rounded-2xl transition-all ${currentView === 'photos' ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-950 shadow-xl' : 'text-zinc-400 hover:text-zinc-600'}`}><ImageIcon className="w-6 h-6" /></button>
         <button onClick={() => setCurrentView('videos')} className={`p-4 rounded-2xl transition-all ${currentView === 'videos' ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-950 shadow-xl' : 'text-zinc-400 hover:text-zinc-600'}`}><VideoIcon className="w-6 h-6" /></button>
@@ -729,7 +646,7 @@ export default function App() {
         </div>
       </nav>
 
-      <main className={`flex-1 overflow-y-auto pb-24 md:pb-0 p-4 md:p-12 ${isSurvivalActive ? 'pt-16' : ''}`}>
+      <main className="flex-1 overflow-y-auto pb-24 md:pb-0 p-4 md:p-12">
         <header className="flex flex-col md:flex-row justify-between gap-6 mb-12">
           <div className="flex-1">
             <h2 className="text-4xl font-black capitalize tracking-tight mb-2">{currentView}</h2>
@@ -737,12 +654,15 @@ export default function App() {
               <p className="text-zinc-400 text-xs font-bold uppercase tracking-widest">{filteredMedia.length} items • {currentUser.name}</p>
               <div className="w-full md:w-64 mt-2">
                 <div className="flex justify-between text-[10px] font-bold text-zinc-500 mb-1 uppercase">
-                  <span className={isReadOnly ? 'text-red-500' : ''}>{isReadOnly ? 'Read Only' : 'Storage'}</span>
+                  <span className={currentUser.isStorageLocked ? 'text-red-500 font-black' : ''}>
+                    {currentUser.isStorageLocked ? 'LOCKED' : 'Storage Used'}
+                  </span>
                   <span>{formatBytes(currentStorageUsed)} / {formatBytes(totalStorageLimit)}</span>
                 </div>
                 <div className="h-1.5 w-full bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden">
-                  <div className={`h-full transition-all duration-500 ${isReadOnly ? 'bg-red-500' : 'bg-blue-500'}`} style={{ width: `${storagePercentage}%` }} />
+                  <div className={`h-full transition-all duration-500 ${currentUser.isStorageLocked ? 'bg-red-500' : 'bg-blue-500'}`} style={{ width: `${storagePercentage}%` }} />
                 </div>
+                <p className="text-[10px] text-zinc-400 mt-1 uppercase font-black">Bonus: {formatBytes(currentUser.bonusStorage || 0)}</p>
               </div>
             </div>
           </div>
@@ -757,18 +677,6 @@ export default function App() {
         {currentView === 'upload' ? (
           <div className="space-y-12 max-w-4xl pb-12">
             
-            {/* Survival Warning if Active */}
-            {isSurvivalActive && (
-              <div className="p-8 rounded-[40px] bg-red-500 text-white shadow-2xl animate-pulse">
-                <h3 className="text-2xl font-black mb-2 uppercase italic">⚠️ SURVIVAL MODE ACTIVE</h3>
-                <p className="font-bold text-sm leading-relaxed">
-                  Your storage has shrunk below your usage due to missed check-ins. 
-                  <br />Check in <span className="underline">right now</span> to spare your gallery. 
-                  Failure to check in within 24 hours will result in permanent data wipe.
-                </p>
-              </div>
-            )}
-
             {/* Daily Check-in Card */}
             <div className={`p-8 rounded-[40px] border relative overflow-hidden transition-all ${darkMode ? 'bg-zinc-900/50 border-zinc-800' : 'bg-white border-zinc-100 shadow-xl'}`}>
               <div className="absolute top-0 right-0 p-12 opacity-5 pointer-events-none">
@@ -780,30 +688,15 @@ export default function App() {
                   <span className="text-[10px] font-black uppercase tracking-tighter">Streak</span>
                 </div>
                 <div className="flex-1 text-center md:text-left">
-                  <h3 className="text-2xl font-black">Lumina Hub</h3>
+                  <h3 className="text-2xl font-black">Daily Lumina Rewards</h3>
                   <p className="text-zinc-500 text-sm mt-1">
-                    Claim <span className="text-blue-500 font-bold">5MB</span> daily to expand and protect.
+                    Check in every day to get <span className="text-blue-500 font-bold">2MB</span> extra storage! 
+                    <br/><span className="text-green-500 text-[10px] font-bold uppercase tracking-widest">No Punishments for Missing Days</span>
                   </p>
                   
-                  {/* Read Only Debt Progress */}
-                  {(currentUser.unlockCreditsNeeded || 0) > 0 && (
-                    <div className="mt-4 p-4 rounded-2xl bg-red-500/5 border border-red-500/10">
-                      <div className="flex justify-between items-center mb-1">
-                        <span className="text-[10px] font-black text-red-500 uppercase tracking-widest">Unlock Task</span>
-                        <span className="text-[10px] font-bold text-zinc-500">{formatBytes(UNLOCK_CREDIT_REQUIREMENT - (currentUser.unlockCreditsNeeded || 0))} / {formatBytes(UNLOCK_CREDIT_REQUIREMENT)}</span>
-                      </div>
-                      <div className="h-1 bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden">
-                        <div 
-                          className="h-full bg-red-500 transition-all duration-1000" 
-                          style={{ width: `${((UNLOCK_CREDIT_REQUIREMENT - (currentUser.unlockCreditsNeeded || 0)) / UNLOCK_CREDIT_REQUIREMENT) * 100}%` }} 
-                        />
-                      </div>
-                    </div>
-                  )}
-
                   <div className="flex items-center gap-4 mt-3">
-                    <span className="text-xs font-bold text-zinc-400 uppercase tracking-widest">Bonus: </span>
-                    <span className={`text-xs font-black uppercase px-2 py-0.5 rounded ${ (currentUser.bonusStorage || 0) >= 0 ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500' }`}>
+                    <span className="text-xs font-bold text-zinc-400 uppercase tracking-widest">Total Earned: </span>
+                    <span className="text-xs font-black uppercase px-2 py-0.5 rounded bg-blue-500/10 text-blue-500">
                       {formatBytes(currentUser.bonusStorage || 0)}
                     </span>
                   </div>
@@ -812,18 +705,23 @@ export default function App() {
                   onClick={handleCheckIn}
                   className="bg-zinc-900 text-white dark:bg-white dark:text-zinc-950 px-8 py-5 rounded-2xl font-black hover:scale-105 active:scale-95 transition-all glow-blue shadow-2xl"
                 >
-                  {isSurvivalActive ? 'CHECK IN TO SURVIVE' : 'Check In'}
+                  Check In Now
                 </button>
               </div>
             </div>
 
             {/* Upload Area */}
-            <div className={`border-4 border-dashed rounded-[40px] p-16 text-center transition-all relative overflow-hidden ${darkMode ? 'bg-zinc-900/30 border-zinc-800' : 'bg-white border-zinc-200 hover:border-zinc-300'} ${isReadOnly ? 'opacity-50' : ''}`}>
-              {isReadOnly && (
+            <div className={`border-4 border-dashed rounded-[40px] p-16 text-center transition-all relative overflow-hidden ${darkMode ? 'bg-zinc-900/30 border-zinc-800' : 'bg-white border-zinc-200 hover:border-zinc-300'} ${!canUpload ? 'opacity-50' : ''}`}>
+              {!canUpload && (
                 <div className="absolute inset-0 z-20 bg-black/5 backdrop-blur-[2px] flex flex-col items-center justify-center p-8">
                   <div className="bg-zinc-900 text-white dark:bg-white dark:text-zinc-950 px-6 py-3 rounded-full font-black text-sm uppercase tracking-widest shadow-2xl mb-4">
-                    Frozen Space
+                    {currentUser.isStorageLocked ? 'Account Locked' : 'Limit Reached'}
                   </div>
+                  {currentUser.isStorageLocked && (
+                    <p className="text-zinc-500 text-[10px] font-black uppercase tracking-widest max-w-[200px]">
+                      Earn 20MB buffer via check-ins to unlock
+                    </p>
+                  )}
                 </div>
               )}
               {isProcessing ? (
@@ -835,9 +733,9 @@ export default function App() {
                 <div className="space-y-6">
                   <div className="w-20 h-20 bg-zinc-100 dark:bg-zinc-800 rounded-3xl flex items-center justify-center mx-auto mb-8 shadow-inner"><UploadIcon className="w-10 h-10 text-zinc-400" /></div>
                   <h3 className="text-2xl font-black">Archive Media</h3>
-                  <label className={`bg-zinc-900 text-white dark:bg-white dark:text-zinc-950 px-12 py-5 rounded-2xl font-black text-lg shadow-2xl transition-all inline-block ${isReadOnly ? 'opacity-30 pointer-events-none' : 'cursor-pointer hover:scale-105 active:scale-95'}`}>
+                  <label className={`bg-zinc-900 text-white dark:bg-white dark:text-zinc-950 px-12 py-5 rounded-2xl font-black text-lg shadow-2xl transition-all inline-block ${!canUpload ? 'opacity-30 pointer-events-none' : 'cursor-pointer hover:scale-105 active:scale-95'}`}>
                     Choose Files
-                    <input type="file" multiple accept="image/*,video/*" className="hidden" onChange={handleFileUpload} disabled={isReadOnly} />
+                    <input type="file" multiple accept="image/*,video/*" className="hidden" onChange={handleFileUpload} disabled={!canUpload} />
                   </label>
                 </div>
               )}
@@ -867,7 +765,7 @@ export default function App() {
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-bold truncate">{file.name}</p>
-                          <p className="text-[10px] text-zinc-400 uppercase tracking-tighter">Pending</p>
+                          <p className="text-[10px] text-zinc-400 uppercase tracking-tighter">Processing soon...</p>
                         </div>
                         {idx === 0 && queueTimeLeft > 0 && <div className="w-2 h-2 bg-blue-500 rounded-full queue-pulse" />}
                       </div>
@@ -887,11 +785,11 @@ export default function App() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <button onClick={cleanDuplicates} className="p-6 rounded-3xl bg-blue-500/5 border border-blue-500/10 text-left hover:bg-blue-500/10 transition-colors">
                   <p className="font-black text-blue-500 uppercase tracking-widest text-sm mb-1">Clear Duplicates</p>
-                  <p className="text-zinc-500 text-xs">Purge identical assets.</p>
+                  <p className="text-zinc-500 text-xs">Purge identical assets from library.</p>
                 </button>
                 <button onClick={fullCleanStorage} className="p-6 rounded-3xl bg-red-500/5 border border-red-500/10 text-left hover:bg-red-500/10 transition-colors">
                   <p className="font-black text-red-500 uppercase tracking-widest text-sm mb-1">Wipe All</p>
-                  <p className="text-zinc-500 text-xs">Emergency full reset.</p>
+                  <p className="text-zinc-500 text-xs">Permanently delete everything.</p>
                 </button>
               </div>
             </div>

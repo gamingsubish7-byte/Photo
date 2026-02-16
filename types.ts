@@ -10,9 +10,8 @@ export interface User {
   name: string;
   lastCheckIn?: number; // Timestamp of last check-in
   checkInStreak?: number; // Current consecutive days
-  bonusStorage?: number; // Bonus/Penalty in bytes
-  unlockCreditsNeeded?: number; // Bytes of credits needed to exit read-only mode
-  survivalModeTimestamp?: number; // Timestamp when the user entered survival mode due to overflow
+  bonusStorage?: number; // Total bonus storage earned in bytes
+  isStorageLocked?: boolean; // True if storage hit limit and needs buffer to unlock
 }
 
 export interface MediaItem {
