@@ -9,6 +9,9 @@ export interface User {
   email: string;
   password?: string;
   name: string;
+  lastCheckIn?: number; // Timestamp of last check-in
+  checkInStreak?: number; // Current consecutive days
+  bonusStorage?: number; // Bonus/Penalty in bytes
 }
 
 export interface MediaItem {
