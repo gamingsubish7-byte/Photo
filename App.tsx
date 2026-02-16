@@ -1,3 +1,4 @@
+
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { ViewType, MediaType, MediaItem, User, AuthView } from './types';
 import { 
@@ -317,6 +318,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [processProgress, setProcessProgress] = useState({ current: 0, total: 0 });
+  const [duplicateCount, setDuplicateCount] = useState(0);
   
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [queueTimeLeft, setQueueTimeLeft] = useState(0);
@@ -336,7 +338,6 @@ export default function App() {
         if (savedUserStr) setCurrentUser(JSON.parse(savedUserStr));
         const savedMedia = await getAllMedia();
         setMedia(savedMedia || []);
-        // Fix: Add explicit 'any' type to catch block for 'unknown' error that can occur in strict mode
       } catch (e: any) { console.error("Gallery failed", e); }
       finally { setIsInitializing(false); }
     };
@@ -389,14 +390,13 @@ export default function App() {
     return Math.min((currentStorageUsed / MAX_STORAGE_BYTES) * 100, 100);
   }, [currentStorageUsed]);
 
-  const filteredMedia = useMemo(() => {
+  // Explicitly type the useMemo return value to resolve inference issues in some TS environments
+  const filteredMedia = useMemo<MediaItem[]>(() => {
     if (!currentUser) return [];
     return media.filter(item => {
       const matchesUser = item.userId === currentUser.id;
       const matchesType = currentView === 'photos' ? item.type === MediaType.IMAGE : item.type === MediaType.VIDEO;
       const matchesSearch = item.title.toLowerCase().includes(searchQuery.toLowerCase());
-      
-      // In Photos view, only show images. In Videos view, only show videos.
       return matchesUser && matchesType && matchesSearch;
     }).sort((a, b) => b.timestamp - a.timestamp);
   }, [media, currentView, searchQuery, currentUser]);
@@ -413,8 +413,17 @@ export default function App() {
         reader.onload = () => resolve(reader.result as string);
       });
 
+      // --- AUTO DUPLICATE DETECTION ---
+      // We check if this exact data already exists for the current user.
+      const isDuplicate = media.some(item => item.userId === currentUser.id && item.url === base64Data);
+      
+      if (isDuplicate) {
+        setDuplicateCount(prev => prev + 1);
+        console.warn(`Duplicate detected: ${file.name}. Automatic deletion triggered.`);
+        return { status: 'duplicate' };
+      }
+
       if (currentStorageUsed + base64Data.length > MAX_STORAGE_BYTES) {
-        // Fix: Use window.alert to avoid potential 'unknown' type issues with global identifiers in some TS environments.
         window.alert(`Storage limit reached! Could not upload ${file.name}.`);
         return null;
       }
@@ -425,12 +434,12 @@ export default function App() {
         type: isImage ? MediaType.IMAGE : MediaType.VIDEO,
         url: base64Data,
         title: file.name,
-        description: `Captured ${new Date().toLocaleDateString()}`,
+        description: `Uploaded ${new Date().toLocaleDateString()}`,
         timestamp: Date.now()
       };
       
       await saveMediaItem(newItem);
-      return newItem;
+      return { status: 'success', item: newItem };
     }
     return null;
   };
@@ -440,45 +449,40 @@ export default function App() {
     if (!files || files.length === 0 || !currentUser) return;
 
     const fileList = Array.from(files) as File[];
-    const immediateFiles = fileList.slice(0, 2); // Now only 2 instant
+    const immediateFiles = fileList.slice(0, 2); 
     const queuedFiles = fileList.slice(2);
 
     setProcessProgress({ current: 0, total: fileList.length });
+    setDuplicateCount(0);
     setIsProcessing(true);
 
-    // Process first 2 immediately
     const immediateResults: MediaItem[] = [];
     for (let i = 0; i < immediateFiles.length; i++) {
       const res = await processFileItem(immediateFiles[i]);
-      if (res) immediateResults.push(res);
+      if (res && res.status === 'success' && res.item) {
+        immediateResults.push(res.item);
+      }
       setProcessProgress(prev => ({ ...prev, current: i + 1 }));
     }
     setMedia(prev => [...prev, ...immediateResults]);
     setIsProcessing(false);
 
-    // Handle the remaining queue
     if (queuedFiles.length > 0) {
       setPendingFiles(queuedFiles);
-      setQueueTimeLeft(120); // 2 minutes
+      setQueueTimeLeft(120); 
 
-      // Initial 2-minute wait
       window.setTimeout(async () => {
         const filesToProcess = [...queuedFiles];
         for (let j = 0; j < filesToProcess.length; j++) {
           const file = filesToProcess[j];
-          
           setIsProcessing(true);
           const res = await processFileItem(file);
-          if (res) {
-            setMedia(prev => [...prev, res]);
+          if (res && res.status === 'success' && res.item) {
+            setMedia(prev => [...prev, res.item!]);
           }
-          
-          // Remove from pending UI
           setPendingFiles(prev => prev.filter(f => f !== file));
           setProcessProgress(prev => ({ ...prev, current: 2 + j + 1 }));
           setIsProcessing(false);
-
-          // 2 seconds delay between each file after the first queue wait
           if (j < filesToProcess.length - 1) {
             await new Promise(r => setTimeout(r, SEQUENTIAL_DELAY));
           }
@@ -486,6 +490,49 @@ export default function App() {
         setQueueTimeLeft(0);
       }, INITIAL_QUEUE_DELAY);
     }
+  };
+
+  // --- CLEANER TOOLS ---
+
+  const cleanDuplicates = async () => {
+    if (!currentUser) return;
+    const userMedia = media.filter(item => item.userId === currentUser.id);
+    const seen = new Map<string, string>(); // url -> first instance id
+    const duplicates: string[] = [];
+
+    userMedia.forEach(item => {
+      if (seen.has(item.url)) {
+        duplicates.push(item.id);
+      } else {
+        seen.set(item.url, item.id);
+      }
+    });
+
+    if (duplicates.length === 0) {
+      window.alert("No duplicate files found in your gallery.");
+      return;
+    }
+
+    if (!window.confirm(`Found ${duplicates.length} duplicate items. Delete them?`)) return;
+
+    for (const id of duplicates) {
+      await deleteMediaItem(id);
+    }
+    setMedia(prev => prev.filter(item => !duplicates.includes(item.id)));
+    window.alert(`Successfully removed ${duplicates.length} duplicates.`);
+  };
+
+  const fullCleanStorage = async () => {
+    if (!currentUser) return;
+    if (!window.confirm("WARNING: This will delete ALL your photos and videos. This cannot be undone. Are you sure?")) return;
+    if (!window.confirm("FINAL CONFIRMATION: Really wipe everything?")) return;
+
+    const userMedia = media.filter(item => item.userId === currentUser.id);
+    for (const item of userMedia) {
+      await deleteMediaItem(item.id);
+    }
+    setMedia(prev => prev.filter(item => item.userId !== currentUser.id));
+    window.alert("Your entire storage has been cleared.");
   };
 
   const deleteItem = async (id: string, e?: React.MouseEvent) => {
@@ -501,7 +548,6 @@ export default function App() {
 
   const deleteSelected = async () => {
     if (selectedIds.size === 0) return;
-    // Fix: Use window.confirm to avoid potential 'unknown' type issues with global identifiers in some TS environments.
     if (!window.confirm(`Delete ${selectedIds.size} items?`)) return;
     
     const idsToDelete = Array.from(selectedIds);
@@ -544,7 +590,7 @@ export default function App() {
         
         <button onClick={() => { setCurrentView('photos'); exitSelectionMode(); }} className={`p-4 rounded-2xl transition-all ${currentView === 'photos' ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-950 shadow-xl' : 'text-zinc-400 hover:text-zinc-600'}`} title="Photos"><ImageIcon className="w-6 h-6" /></button>
         <button onClick={() => { setCurrentView('videos'); exitSelectionMode(); }} className={`p-4 rounded-2xl transition-all ${currentView === 'videos' ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-950 shadow-xl' : 'text-zinc-400 hover:text-zinc-600'}`} title="Videos"><VideoIcon className="w-6 h-6" /></button>
-        <button onClick={() => { setCurrentView('upload'); exitSelectionMode(); }} className={`p-4 rounded-2xl transition-all ${currentView === 'upload' ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-950 shadow-xl' : 'text-zinc-400 hover:text-zinc-600'}`} title="Upload"><UploadIcon className="w-6 h-6" /></button>
+        <button onClick={() => { setCurrentView('upload'); exitSelectionMode(); }} className={`p-4 rounded-2xl transition-all ${currentView === 'upload' ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-950 shadow-xl' : 'text-zinc-400 hover:text-zinc-600'}`} title="Upload & Tools"><UploadIcon className="w-6 h-6" /></button>
         
         <div className="md:mt-auto flex md:flex-col items-center gap-4">
           <a href="https://wa.me/+9779869400576" target="_blank" rel="noopener noreferrer" className="p-4 text-green-500 hover:scale-110 transition-transform" title="Contact Us on WhatsApp">
@@ -617,38 +663,91 @@ export default function App() {
 
         {currentView === 'upload' ? (
           <div className="space-y-12 max-w-4xl">
-            {/* Upload Area */}
-            <div className={`border-4 border-dashed rounded-[40px] p-24 text-center transition-all ${darkMode ? 'bg-zinc-900/30 border-zinc-800 hover:border-zinc-700' : 'bg-white border-zinc-200 hover:border-zinc-300'}`}>
+            {/* Upload Area with Auto-Detection Notice */}
+            <div className={`border-4 border-dashed rounded-[40px] p-16 text-center transition-all ${darkMode ? 'bg-zinc-900/30 border-zinc-800 hover:border-zinc-700' : 'bg-white border-zinc-200 hover:border-zinc-300'}`}>
               {isProcessing ? (
                 <div className="space-y-6">
                   <div className="w-16 h-16 border-4 border-zinc-500 border-t-transparent rounded-full animate-spin mx-auto" />
                   <p className="text-xl font-bold">Transferring {processProgress.current} of {processProgress.total}...</p>
+                  {duplicateCount > 0 && (
+                    <p className="text-sm text-amber-500 font-bold animate-pulse">Auto-skipping {duplicateCount} duplicates...</p>
+                  )}
                 </div>
               ) : (
                 <div className="space-y-6">
                   <div className="w-20 h-20 bg-zinc-100 dark:bg-zinc-800 rounded-3xl flex items-center justify-center mx-auto mb-8 shadow-inner">
                     <UploadIcon className="w-10 h-10 text-zinc-400" />
                   </div>
-                  <h3 className="text-2xl font-black">Upload New Memories</h3>
-                  <p className="text-zinc-500 max-w-sm mx-auto mb-8">Drag and drop or select files. First 2 are instant, others enter a 2-minute batch queue.</p>
+                  <h3 className="text-2xl font-black">Drop Your Media Here</h3>
+                  <p className="text-zinc-500 max-w-sm mx-auto mb-8">
+                    <span className="text-blue-500 font-bold block mb-1">AUTO DUPLICATE PROTECTION ENABLED</span>
+                    Identical files are automatically identified and skipped to save storage space.
+                  </p>
                   <label className="cursor-pointer bg-zinc-900 text-white dark:bg-white dark:text-zinc-950 px-12 py-5 rounded-2xl font-black text-lg shadow-2xl hover:scale-105 active:scale-95 transition-all inline-block">
                     Select Files
                     <input type="file" multiple accept="image/*,video/*" className="hidden" onChange={handleFileUpload} />
                   </label>
+                  {duplicateCount > 0 && (
+                    <div className="mt-6 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-sm font-bold">
+                      Note: {duplicateCount} duplicate {duplicateCount === 1 ? 'file was' : 'files were'} detected and automatically deleted from the current upload batch.
+                    </div>
+                  )}
                 </div>
               )}
             </div>
 
+            {/* Storage Tools Section */}
+            <div className={`p-8 rounded-[40px] border transition-all ${darkMode ? 'bg-zinc-900/50 border-zinc-800' : 'bg-white border-zinc-100 shadow-xl'}`}>
+              <div className="mb-8">
+                <h4 className="text-xl font-black tracking-tight">Gallery Maintenance</h4>
+                <p className="text-zinc-500 text-sm mt-1">Advanced tools to optimize your media library.</p>
+              </div>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="flex flex-col items-start gap-4 p-6 rounded-3xl bg-blue-500/5 border border-blue-500/10">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-blue-500 text-white rounded-xl flex items-center justify-center">
+                      <SearchIcon className="w-5 h-5" />
+                    </div>
+                    <p className="font-black text-blue-500 uppercase tracking-widest text-sm">Deep Cleanup</p>
+                  </div>
+                  <p className="text-zinc-500 text-xs">Scans your entire existing gallery for identical files and purges duplicates instantly.</p>
+                  <button 
+                    onClick={cleanDuplicates}
+                    className="mt-2 bg-blue-500 text-white px-6 py-3 rounded-xl font-bold text-sm hover:scale-105 transition-all shadow-lg active:scale-95"
+                  >
+                    Scan Existing Media
+                  </button>
+                </div>
+
+                <div className="flex flex-col items-start gap-4 p-6 rounded-3xl bg-red-500/5 border border-red-500/10">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-red-500 text-white rounded-xl flex items-center justify-center">
+                      <TrashIcon className="w-5 h-5" />
+                    </div>
+                    <p className="font-black text-red-500 uppercase tracking-widest text-sm">Factory Reset</p>
+                  </div>
+                  <p className="text-zinc-500 text-xs italic">Permanently wipe all photos and videos to start with a fresh storage space.</p>
+                  <button 
+                    onClick={fullCleanStorage}
+                    className="mt-2 bg-red-500 text-white px-6 py-3 rounded-xl font-bold text-sm hover:scale-105 transition-all shadow-lg active:scale-95"
+                  >
+                    Wipe Entire Gallery
+                  </button>
+                </div>
+              </div>
+            </div>
+
             {/* Queue Visualization */}
-            <div className="space-y-6">
+            <div className="space-y-6 pb-20">
               <div className="flex items-center justify-between">
                 <h4 className="text-xl font-black tracking-tight flex items-center gap-3">
-                  Upload Queue 
-                  {pendingFiles.length > 0 && <span className="text-xs bg-blue-500 text-white px-2 py-0.5 rounded-full">{pendingFiles.length} pending</span>}
+                  Background Queue 
+                  {pendingFiles.length > 0 && <span className="text-xs bg-blue-500 text-white px-2 py-0.5 rounded-full">{pendingFiles.length} items</span>}
                 </h4>
                 {queueTimeLeft > 0 && (
                   <div className="flex items-center gap-2 text-blue-500 font-black tabular-nums">
-                    <span className="text-xs uppercase tracking-widest opacity-60">Wait time:</span>
+                    <span className="text-xs uppercase tracking-widest opacity-60">Status: Processing in</span>
                     <span className="text-2xl">{formatTime(queueTimeLeft)}</span>
                   </div>
                 )}
@@ -665,7 +764,7 @@ export default function App() {
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-bold truncate">{file.name}</p>
                           <p className="text-[10px] text-zinc-400 uppercase tracking-tighter">
-                            {idx === 0 && queueTimeLeft > 0 ? 'Next in line' : 'Waiting in batch'}
+                            {idx === 0 && queueTimeLeft > 0 ? 'Pending conversion' : 'Queued for batch'}
                           </p>
                         </div>
                         {idx === 0 && queueTimeLeft > 0 && (
@@ -674,20 +773,17 @@ export default function App() {
                       </div>
                     ))}
                   </div>
-                  <p className="mt-8 text-center text-xs font-bold text-zinc-500 uppercase tracking-widest italic animate-pulse">
-                    "Stay on this page until queue clears"
-                  </p>
                 </div>
               ) : (
                 <div className="h-32 rounded-[30px] border border-dashed flex items-center justify-center text-zinc-400 font-bold uppercase tracking-widest opacity-20">
-                  Queue is empty
+                  No pending uploads
                 </div>
               )}
             </div>
           </div>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-6">
-            {filteredMedia.length > 0 ? filteredMedia.map(item => {
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-6 pb-20">
+            {filteredMedia.length > 0 ? filteredMedia.map((item: MediaItem) => {
               const isSelected = selectedIds.has(item.id);
               return (
                 <div 
@@ -698,8 +794,10 @@ export default function App() {
                   {item.type === MediaType.IMAGE ? (
                     <img src={item.url} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" loading="lazy" />
                   ) : (
-                    <div className="w-full h-full bg-zinc-800 flex items-center justify-center">
-                      <VideoIcon className="text-zinc-600 w-12 h-12" />
+                    <div className="w-full h-full bg-zinc-800 flex items-center justify-center relative">
+                       {/* Explicitly cast item.url to string to fix TypeScript "unknown" error on line 554 */}
+                       <img src={item.url as string} className="w-full h-full object-cover opacity-50 blur-sm absolute inset-0" />
+                      <VideoIcon className="text-white w-12 h-12 relative z-10" />
                       <div className="absolute top-4 right-4 bg-black/40 backdrop-blur-md p-1.5 rounded-lg">
                         <VideoIcon className="w-4 h-4 text-white" />
                       </div>
@@ -707,7 +805,7 @@ export default function App() {
                   )}
 
                   {isSelectionMode && (
-                    <div className={`absolute top-4 left-4 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${isSelected ? 'bg-blue-500 border-blue-500 shadow-lg' : 'bg-black/20 border-white/50'}`}>
+                    <div className={`absolute top-4 left-4 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all z-20 ${isSelected ? 'bg-blue-500 border-blue-500 shadow-lg' : 'bg-black/20 border-white/50'}`}>
                       {isSelected && (
                         <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={4} d="M5 13l4 4L19 7" />
@@ -716,7 +814,7 @@ export default function App() {
                     </div>
                   )}
 
-                  <div className={`absolute inset-0 bg-gradient-to-t from-black/60 to-transparent transition-opacity p-4 flex flex-col justify-end ${isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+                  <div className={`absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent transition-opacity p-4 flex flex-col justify-end ${isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
                     <div className="flex justify-between items-center">
                       {!isSelectionMode && (
                         <button onClick={(e) => deleteItem(item.id, e)} className="p-3 bg-red-500 text-white rounded-xl hover:bg-red-600 transition-colors shadow-lg">
@@ -733,7 +831,7 @@ export default function App() {
             }) : (
               <div className="col-span-full py-32 text-center opacity-20">
                 <SearchIcon className="w-24 h-24 mx-auto mb-6" />
-                <p className="text-3xl font-black uppercase tracking-widest">No {currentView} yet</p>
+                <p className="text-3xl font-black uppercase tracking-widest">No {currentView} found</p>
               </div>
             )}
           </div>
@@ -748,7 +846,7 @@ export default function App() {
             ) : (
               <CustomVideoPlayer item={selectedItem} onToggleFullscreen={() => {}} />
             )}
-            <button className="absolute -top-4 -right-4 md:top-0 md:right-0 bg-white/10 hover:bg-white/20 text-white w-12 h-12 rounded-full flex items-center justify-center text-2xl transition-all" onClick={() => setSelectedItem(null)}>✕</button>
+            <button className="absolute -top-12 md:top-0 right-0 bg-white/10 hover:bg-white/20 text-white w-12 h-12 rounded-full flex items-center justify-center text-2xl transition-all" onClick={() => setSelectedItem(null)}>✕</button>
             <div className="absolute bottom-[-40px] left-0 right-0 text-center">
                <p className="text-white/60 font-bold text-sm tracking-widest uppercase">{selectedItem.title}</p>
             </div>
