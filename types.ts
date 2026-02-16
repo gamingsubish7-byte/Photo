@@ -7,21 +7,20 @@ export enum MediaType {
 export interface User {
   id: string;
   email: string;
+  password?: string;
   name: string;
-  accessToken?: string;
-  driveFolderId?: string;
 }
 
 export interface MediaItem {
-  id: string; // The Google Drive File ID
+  id: string;
   userId: string;
   type: MediaType;
-  url: string; // Temporary webContentLink or thumbnailLink
+  url: string; // Base64 data for local storage
   title: string;
   description: string;
   timestamp: number;
   duration?: number;
 }
 
-export type ViewType = 'photos' | 'videos' | 'upload' | 'landing';
-export type AuthView = 'landing' | 'options' | 'email-signin' | 'email-signup';
+export type ViewType = 'photos' | 'videos' | 'upload';
+export type AuthView = 'signin' | 'signup' | 'forgot';
